@@ -1,6 +1,6 @@
 name: CI
 
-# Backend-only CI: build, lint and Go unit tests against Postgres and Redis
+# Backend-only CI: build, lint and Go unit tests against Postgres, Redis and OpenLDAP
 
 on:
   pull_request:
@@ -51,7 +51,7 @@ jobs:
   unit-test:
     name: unit tests
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 180
     services:
       postgres:
         image: postgres:18
@@ -89,5 +89,8 @@ jobs:
           cache-dependency-path: src/go.sum
       - name: Generate API server code
         run: make gen_apis
+      - name: Start OpenLDAP
+        working-directory: tests
+        run: ./ldapprepare.sh
       - name: Unit tests
         run: ./tests/ci/ut_lite.sh

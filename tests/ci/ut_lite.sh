@@ -1,6 +1,5 @@
 #!/bin/bash
-# Backend unit tests with only Postgres and Redis on localhost, run `make gen_apis` first.
-# Unlike the upstream setup (ut_install.sh + ut_run.sh) there is no LDAP server, see SKIP_PKGS.
+# Backend unit tests (-race) against Postgres, Redis and tests/ldapprepare.sh's OpenLDAP on localhost, run `make gen_apis` first.
 set -euo pipefail
 
 cd "$(dirname "$0")/../.."
@@ -31,18 +30,8 @@ if [ ! -f /etc/core/ca/ca.crt ]; then
   sudo cp tests/ca.crt /etc/core/ca/ca.crt
 fi
 
-# need an LDAP server
-SKIP_PKGS=(
-  src/controller/ldap$
-  src/controller/usergroup/test$
-  src/core/auth/ldap$
-  src/pkg/ldap$
-)
-skip_re=$(IFS='|'; echo "${SKIP_PKGS[*]}")
-
 cd src
-mapfile -t pkgs < <(go list ./... | grep -v -E 'tests|testing' | grep -v -E "$skip_re")
-echo "skipping: ${SKIP_PKGS[*]}"
+mapfile -t pkgs < <(go list ./... | grep -v -E 'tests|testing')
 
 # -p 1: the packages share one database
-go test -count=1 -p 1 "$@" "${pkgs[@]}"
+go test -count=1 -race -p 1 "$@" "${pkgs[@]}"
