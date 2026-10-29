@@ -156,6 +156,7 @@ func main() {
 		// configure the beego session redis
 		web.BConfig.WebConfig.Session.SessionProvider = session.HarborProviderName
 		web.BConfig.WebConfig.Session.SessionProviderConfig = redisCoreURL
+		web.InsertFilterChain("*", session.CookieFilterChain)
 	}
 
 	log.Info("initializing cache ...")
