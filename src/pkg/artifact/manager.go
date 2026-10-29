@@ -37,6 +37,9 @@ type Manager interface {
 	// Create the artifact. If the artifact is an index, make sure all the artifacts it references
 	// already exist
 	Create(ctx context.Context, artifact *Artifact) (id int64, err error)
+	// Ensure creates the artifact as Create does if no artifact with the same digest exists
+	// under the repository, and returns the ID of the created or existing one
+	Ensure(ctx context.Context, artifact *Artifact) (created bool, id int64, err error)
 	// Delete just deletes the artifact record. The underlying data of registry will be
 	// removed during garbage collection
 	Delete(ctx context.Context, id int64) (err error)
@@ -106,13 +109,32 @@ func (m *manager) Create(ctx context.Context, artifact *Artifact) (int64, error)
 	if err != nil {
 		return 0, err
 	}
-	for _, reference := range artifact.References {
-		reference.ParentID = id
-		if _, err = m.dao.CreateReference(ctx, reference.To()); err != nil {
-			return 0, err
-		}
+	if err = m.createReferences(ctx, id, artifact.References); err != nil {
+		return 0, err
 	}
 	return id, nil
+}
+
+func (m *manager) Ensure(ctx context.Context, artifact *Artifact) (bool, int64, error) {
+	created, id, err := m.dao.Ensure(ctx, artifact.To())
+	if err != nil || !created {
+		return false, id, err
+	}
+	// the parent is new and invisible to others until committed, so the references can't conflict
+	if err = m.createReferences(ctx, id, artifact.References); err != nil {
+		return false, 0, err
+	}
+	return true, id, nil
+}
+
+func (m *manager) createReferences(ctx context.Context, parentID int64, references []*Reference) error {
+	for _, reference := range references {
+		reference.ParentID = parentID
+		if _, err := m.dao.CreateReference(ctx, reference.To()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func (m *manager) Delete(ctx context.Context, id int64) error {
 	// delete references

@@ -174,7 +174,15 @@ func (c *controller) Ensure(ctx context.Context, repository, digest string, opti
 			}
 		}
 		for _, acc := range option.Accs {
-			if err = c.accessoryMgr.Ensure(ctx, artifact.Digest, artifact.RepositoryName, artifact.ID, acc.ArtifactID, acc.Size, acc.Digest, acc.Type); err != nil {
+			if err = c.accessoryMgr.Ensure(ctx, accessorymodel.AccessoryData{
+				ArtifactID:        acc.ArtifactID,
+				SubArtifactID:     artifact.ID,
+				SubArtifactRepo:   artifact.RepositoryName,
+				SubArtifactDigest: artifact.Digest,
+				Size:              acc.Size,
+				Digest:            acc.Digest,
+				Type:              acc.Type,
+			}); err != nil {
 				return false, 0, err
 			}
 		}
@@ -237,36 +245,19 @@ func (c *controller) ensureArtifact(ctx context.Context, repository, digest stri
 	// populate the artifact type
 	artifact.Type = processor.Get(artifact.ResolveArtifactType()).GetArtifactType(ctx, artifact)
 
-	// create it
-	// use orm.WithTransaction here to avoid the issue:
-	// https://www.postgresql.org/message-id/002e01c04da9%24a8f95c20%2425efe6c1%40lasting.ro
-	created := false
-	if err = orm.WithTransaction(func(ctx context.Context) error {
-		id, err := c.artMgr.Create(ctx, artifact)
-		if err != nil {
-			return err
-		}
-		created = true
-		artifact.ID = id
-		return nil
-	})(orm.SetTransactionOpNameToContext(ctx, "tx-ensure-artifact")); err != nil {
-		// got error that isn't conflict error, return directly
-		if !errors.IsConflictErr(err) {
-			return false, nil, err
-		}
-		log.Debugf("failed to create artifact %s@%s: %v", repository, digest, err)
-		// if got conflict error, try to get the artifact again
+	created, id, err := c.artMgr.Ensure(ctx, artifact)
+	if err != nil {
+		return false, nil, err
+	}
+	if !created {
+		// created by others concurrently
 		artifact, err = c.artMgr.GetByDigest(ctx, repository, digest)
-		if err != nil {
-			return false, nil, err
-		}
+		return false, artifact, err
 	}
 
-	if created {
-		c.touchRepo(ctx, repo.RepositoryID)
-	}
-
-	return created, artifact, nil
+	artifact.ID = id
+	c.touchRepo(ctx, repo.RepositoryID)
+	return true, artifact, nil
 }
 
 // touchRepo bumps update_time on the parent repository so the "last modified"

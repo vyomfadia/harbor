@@ -46,6 +46,10 @@ func (f *fakeDao) Create(ctx context.Context, tag *tag.Tag) (int64, error) {
 	args := f.Called()
 	return int64(args.Int(0)), args.Error(1)
 }
+func (f *fakeDao) Ensure(ctx context.Context, tag *tag.Tag) (bool, int64, error) {
+	args := f.Called()
+	return args.Bool(0), int64(args.Int(1)), args.Error(2)
+}
 func (f *fakeDao) Update(ctx context.Context, tag *tag.Tag, props ...string) error {
 	args := f.Called()
 	return args.Error(0)

@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	beegoorm "github.com/beego/beego/v2/client/orm"
 	"github.com/stretchr/testify/suite"
@@ -28,6 +29,7 @@ import (
 	"github.com/goharbor/harbor/src/lib/q"
 	artdao "github.com/goharbor/harbor/src/pkg/artifact/dao"
 	htesting "github.com/goharbor/harbor/src/testing"
+	ormtesting "github.com/goharbor/harbor/src/testing/lib/orm"
 )
 
 type daoTestSuite struct {
@@ -167,6 +169,83 @@ func (d *daoTestSuite) TestCreate() {
 	_, err := d.dao.Create(d.ctx, acc)
 	d.Require().NotNil(err)
 	d.True(errors.IsErr(err, errors.ConflictCode))
+}
+
+func (d *daoTestSuite) TestEnsure() {
+	creationTime := time.Date(2024, 1, 2, 3, 4, 5, 123456789, time.UTC)
+	for _, acc := range []Accessory{
+		{
+			ArtifactID:          d.artifactID,
+			SubjectArtifactID:   d.subArtifactID,
+			SubjectArtifactRepo: d.subArtifactRepo,
+			Type:                "signature.cosign",
+			Source:              "proxy-cache",
+			Size:                1234,
+			Digest:              d.DigestString(),
+			CreationTime:        creationTime,
+		},
+		// filled by auto_now_add
+		{ArtifactID: d.artifactID},
+	} {
+		created := acc
+		created.SubjectArtifactDigest = d.DigestString()
+		createdID, err := d.dao.Create(d.ctx, &created)
+		d.Require().NoError(err)
+
+		ensured := acc
+		ensured.SubjectArtifactDigest = d.DigestString()
+		ok, ensuredID, err := d.dao.Ensure(d.ctx, &ensured)
+		d.Require().NoError(err)
+		d.True(ok)
+
+		// the same row as Create writes
+		omit := []string{"id", "subject_artifact_digest"}
+		if acc.CreationTime.IsZero() {
+			d.False(ensured.CreationTime.IsZero())
+			omit = append(omit, "creation_time")
+		}
+		createdRow, err := ormtesting.RowJSON(d.ctx, "artifact_accessory", "id", createdID, omit...)
+		d.Require().NoError(err)
+		ensuredRow, err := ormtesting.RowJSON(d.ctx, "artifact_accessory", "id", ensuredID, omit...)
+		d.Require().NoError(err)
+		d.Equal(createdRow, ensuredRow)
+
+		d.Require().NoError(d.dao.Delete(d.ctx, createdID))
+		d.Require().NoError(d.dao.Delete(d.ctx, ensuredID))
+	}
+
+	// exists
+	ok, id, err := d.dao.Ensure(d.ctx, &Accessory{
+		ArtifactID:            d.artifactID,
+		SubjectArtifactDigest: d.subArtifactDigest,
+		Digest:                d.DigestString(),
+	})
+	d.Require().NoError(err)
+	d.False(ok)
+	d.Equal(d.accID, id)
+}
+
+func (d *daoTestSuite) TestEnsureConcurrently() {
+	acc := &Accessory{
+		ArtifactID:            d.artifactID,
+		SubjectArtifactRepo:   d.subArtifactRepo,
+		SubjectArtifactDigest: d.DigestString(),
+		Digest:                d.DigestString(),
+		Type:                  "signature.cosign",
+	}
+	result := ormtesting.EnsureConcurrently(d.ctx, 16, func(ctx context.Context) (bool, int64, error) {
+		return d.dao.Ensure(ctx, acc)
+	})
+	d.Require().Empty(result.Errs)
+	d.Equal(1, result.Created)
+	d.Require().Len(result.IDs, 16)
+	for _, id := range result.IDs {
+		d.Equal(result.IDs[0], id)
+	}
+	total, err := d.dao.Count(d.ctx, q.New(q.KeyWords{"SubjectArtifactDigest": acc.SubjectArtifactDigest}))
+	d.Require().NoError(err)
+	d.Equal(int64(1), total)
+	d.Require().NoError(d.dao.Delete(d.ctx, result.IDs[0]))
 }
 
 func (d *daoTestSuite) TestUpdate() {

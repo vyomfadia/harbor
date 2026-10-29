@@ -40,6 +40,9 @@ type DAO interface {
 	GetByDigest(ctx context.Context, repository, digest string) (artifact *Artifact, err error)
 	// Create the artifact
 	Create(ctx context.Context, artifact *Artifact) (id int64, err error)
+	// Ensure creates the artifact if no artifact with the same digest exists under the repository,
+	// and returns the ID of the created or existing one
+	Ensure(ctx context.Context, artifact *Artifact) (created bool, id int64, err error)
 	// Delete the artifact specified by ID
 	Delete(ctx context.Context, id int64) (err error)
 	// Update updates the artifact. Only the properties specified by "props" will be updated if it is set
@@ -165,6 +168,28 @@ func (d *dao) Create(ctx context.Context, artifact *Artifact) (int64, error) {
 	}
 	return id, err
 }
+
+func (d *dao) Ensure(ctx context.Context, artifact *Artifact) (bool, int64, error) {
+	var annotations any
+	if artifact.Annotations != "" {
+		annotations = artifact.Annotations
+	}
+	id, created, err := orm.InsertOrGetID(ctx,
+		`INSERT INTO artifact (type, media_type, manifest_media_type, artifact_type, project_id, repository_id,
+	repository_name, digest, size, icon, push_time, pull_time, extra_attrs, annotations)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz, ?, ?)
+ON CONFLICT (repository_id, digest) DO NOTHING RETURNING id`,
+		[]any{artifact.Type, artifact.MediaType, artifact.ManifestMediaType, artifact.ArtifactType, artifact.ProjectID,
+			artifact.RepositoryID, artifact.RepositoryName, artifact.Digest, artifact.Size, artifact.Icon,
+			orm.TimeArg(artifact.PushTime), orm.TimeArg(artifact.PullTime), artifact.ExtraAttrs, annotations},
+		`SELECT id FROM artifact WHERE repository_id = ? AND digest = ?`,
+		artifact.RepositoryID, artifact.Digest)
+	if err != nil {
+		return false, 0, err
+	}
+	return created, id, nil
+}
+
 func (d *dao) Delete(ctx context.Context, id int64) error {
 	ormer, err := orm.FromContext(ctx)
 	if err != nil {

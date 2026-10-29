@@ -39,8 +39,8 @@ var (
 
 // Manager is the only interface of artifact module to provide the management functions for artifacts
 type Manager interface {
-	// Ensure ...
-	Ensure(ctx context.Context, subArtDigest, subArtRepo string, subArtID, artifactID, size int64, digest, accType string) error
+	// Ensure creates the accessory if no accessory of the same artifact and subject digest exists
+	Ensure(ctx context.Context, accessory model.AccessoryData) error
 	// Get the artifact specified by the ID
 	Get(ctx context.Context, id int64) (accessory model.Accessory, err error)
 	// Count returns the total count of accessory according to the query.
@@ -70,25 +70,8 @@ type manager struct {
 	dao dao.DAO
 }
 
-func (m *manager) Ensure(ctx context.Context, subArtDigest, subArtRepo string, subArtID, artifactID, size int64, digest, accType string) error {
-	accs, err := m.dao.List(ctx, q.New(q.KeyWords{"ArtifactID": artifactID, "Digest": digest}))
-	if err != nil {
-		return err
-	}
-	if len(accs) > 0 {
-		return nil
-	}
-
-	acc := model.AccessoryData{
-		ArtifactID:        artifactID,
-		SubArtifactID:     subArtID,
-		SubArtifactRepo:   subArtRepo,
-		SubArtifactDigest: subArtDigest,
-		Digest:            digest,
-		Size:              size,
-		Type:              accType,
-	}
-	_, err = m.Create(ctx, acc)
+func (m *manager) Ensure(ctx context.Context, accessory model.AccessoryData) error {
+	_, _, err := m.dao.Ensure(ctx, toDAO(accessory))
 	return err
 }
 
@@ -143,7 +126,11 @@ func (m *manager) List(ctx context.Context, query *q.Query) ([]model.Accessory, 
 }
 
 func (m *manager) Create(ctx context.Context, accessory model.AccessoryData) (int64, error) {
-	acc := &dao.Accessory{
+	return m.dao.Create(ctx, toDAO(accessory))
+}
+
+func toDAO(accessory model.AccessoryData) *dao.Accessory {
+	return &dao.Accessory{
 		ArtifactID:            accessory.ArtifactID,
 		SubjectArtifactID:     accessory.SubArtifactID,
 		SubjectArtifactRepo:   accessory.SubArtifactRepo,
@@ -153,7 +140,6 @@ func (m *manager) Create(ctx context.Context, accessory model.AccessoryData) (in
 		Type:                  accessory.Type,
 		Source:                accessory.Source,
 	}
-	return m.dao.Create(ctx, acc)
 }
 
 func (m *manager) Update(ctx context.Context, accessory model.AccessoryData) error {
