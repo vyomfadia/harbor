@@ -1,7 +1,8 @@
 name: Images
 
-# Builds the images of the components this fork patches from the upstream
-# make/photon/<component>/Dockerfile and pushes them to ghcr.io/<owner>/<image>.
+# Builds the Harbor component images the fork's deployment uses with upstream's make/photon/<component>/Dockerfile, build scripts and
+# pinned versions on top of upstream's goharbor/harbor-<component>-base images, and pushes them to
+# ghcr.io/<owner>/<upstream image name>.
 
 on:
   push:
@@ -10,6 +11,11 @@ on:
       - 'release-*'
     tags:
       - 'v*'
+  pull_request:
+    paths:
+      - .github/workflows/images.yml
+      - Makefile
+      - make/photon/**
   workflow_dispatch:
     inputs:
       ref:
@@ -17,7 +23,7 @@ on:
         required: false
         default: ''
       base_image_tag:
-        description: 'Tag of the upstream goharbor/harbor-*-base images, default is VERSION if published, else "dev"'
+        description: 'Tag of the upstream goharbor/harbor-*-base images, default is VERSION if published, else the latest published patch of the same minor, else "dev"'
         required: false
         default: ''
 
@@ -33,31 +39,28 @@ jobs:
   build:
     name: ${{ matrix.image }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         include:
-          - image: harbor-core
-            component: core
-            make_targets: versions_prepare compile_core
-          - image: harbor-jobservice
-            component: jobservice
-            make_targets: compile_jobservice
-          # the exporter Dockerfile compiles the binary itself
-          - image: harbor-exporter
-            component: exporter
-            make_targets: ''
+          - { image: harbor-core, component: core }
+          - { image: harbor-jobservice, component: jobservice }
+          - { image: harbor-portal, component: portal }
+          - { image: harbor-registryctl, component: registryctl }
+          - { image: registry-photon, component: registry }
     env:
       IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+      COMPONENT: ${{ matrix.component }}
       INPUT_REF: ${{ inputs.ref }}
       INPUT_BASE_TAG: ${{ inputs.base_image_tag }}
+      PUSH: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
 
-      - name: Resolve tags and base image
+      - name: Resolve tags, versions and base image
         id: meta
         run: |
           set -euo pipefail
@@ -78,29 +81,35 @@ jobs:
             version_tag="$ref_tag"
           fi
 
-          # upstream publishes the base image as :<VERSION> for release branches and :dev for main
+          # upstream publishes base images as :<VERSION> for releases and :dev for main
           base_ns=goharbor
-          base_repo="$base_ns/harbor-${{ matrix.component }}-base"
+          base_repo="$base_ns/harbor-$COMPONENT-base"
+          minor=$(echo "$version" | grep -Eo '^v[0-9]+\.[0-9]+' || true)
           if [ -n "$INPUT_BASE_TAG" ]; then
             base_tag="$INPUT_BASE_TAG"
           elif docker manifest inspect "$base_repo:$version" >/dev/null 2>&1; then
             base_tag="$version"
           else
-            base_tag=dev
+            base_tag=$(curl -fsSL "https://hub.docker.com/v2/repositories/$base_repo/tags?name=$minor.&page_size=100" \
+              | jq -r '.results[].name' | grep -E "^${minor//./\\.}\.[0-9]+$" | sort -V | tail -n1 || true)
+            base_tag="${base_tag:-dev}"
           fi
 
-          gobuildimage=$(sed -n 's/^GOBUILDIMAGE=//p' Makefile)
+          # upstream's pinned versions, evaluated by make so overrides and derived values match `make build`
+          printf 'print-%%:\n\t@echo $($*)\n' > "$RUNNER_TEMP/print.mk"
+          mkvar() { make -s --no-print-directory -f Makefile -f "$RUNNER_TEMP/print.mk" ARCH=amd64 "print-$1"; }
 
           {
             echo "tags=$tags"
             echo "sha=$sha"
             echo "full_sha=$(git rev-parse HEAD)"
-            echo "version=$version"
             echo "version_tag=$version_tag"
             echo "base_ns=$base_ns"
             echo "base_tag=$base_tag"
-            echo "gobuildimage=$gobuildimage"
-          } >> "$GITHUB_OUTPUT"
+            for v in GOBUILDIMAGE NODEBUILDIMAGE NPM_REGISTRY REGISTRY_SRC_TAG DISTRIBUTION_SRC; do
+              echo "$v=$(mkvar "$v")"
+            done
+          } | tee -a "$GITHUB_OUTPUT"
 
           {
             echo "### ${{ matrix.image }}"
@@ -109,16 +118,34 @@ jobs:
             echo "- tags: \`${tags//,/\`, \`}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # -o lint_apis skips the swagger spec lint, which needs a node toolchain image
-      - name: Compile binaries
-        if: matrix.make_targets != ''
-        run: make -o lint_apis ${{ matrix.make_targets }} ARCH=amd64 VERSIONTAG=${{ steps.meta.outputs.version_tag }}
+      # mirrors the compile_* targets and the binary steps of upstream's make/photon/Makefile _build_* targets;
+      # runs before Buildx is set up so the builder scripts use the local docker daemon
+      - name: Prepare build context
+        env:
+          VERSIONTAG: ${{ steps.meta.outputs.version_tag }}
+          GOBUILDIMAGE: ${{ steps.meta.outputs.GOBUILDIMAGE }}
+          REGISTRY_SRC_TAG: ${{ steps.meta.outputs.REGISTRY_SRC_TAG }}
+          DISTRIBUTION_SRC: ${{ steps.meta.outputs.DISTRIBUTION_SRC }}
+        run: |
+          set -euo pipefail
+          build_registry() {
+            (cd make/photon/registry && ./builder "$REGISTRY_SRC_TAG" "$DISTRIBUTION_SRC" "$GOBUILDIMAGE" default)
+            chmod 655 make/photon/registry/binary/registry
+          }
+          # -o lint_apis skips the swagger spec lint, which needs a node toolchain image
+          case "$COMPONENT" in
+            core) make -o lint_apis versions_prepare compile_core ARCH=amd64 VERSIONTAG="$VERSIONTAG" ;;
+            jobservice) make compile_jobservice ARCH=amd64 ;;
+            registryctl) make compile_registryctl ARCH=amd64 && build_registry ;;
+            registry) build_registry ;;
+          esac
 
       # only Buildx, installing a different Docker breaks it (see upstream d822d80c2)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Log in to GHCR
+        if: env.PUSH == 'true'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ghcr.io
@@ -131,17 +158,16 @@ jobs:
           context: .
           file: make/photon/${{ matrix.component }}/Dockerfile
           platforms: linux/amd64
-          push: true
+          push: ${{ env.PUSH == 'true' }}
           tags: ${{ steps.meta.outputs.tags }}
           build-args: |
             harbor_base_namespace=${{ steps.meta.outputs.base_ns }}
             harbor_base_image_version=${{ steps.meta.outputs.base_tag }}
-            build_image=${{ steps.meta.outputs.gobuildimage }}
-            harbor_version=${{ steps.meta.outputs.version }}
-            git_commit=${{ steps.meta.outputs.sha }}
+            NODE=${{ steps.meta.outputs.NODEBUILDIMAGE }}
+            npm_registry=${{ steps.meta.outputs.NPM_REGISTRY }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ steps.meta.outputs.full_sha }}
             org.opencontainers.image.version=${{ steps.meta.outputs.version_tag }}
           cache-from: type=gha,scope=${{ matrix.image }}
-          cache-to: type=gha,scope=${{ matrix.image }},mode=max
+          cache-to: ${{ env.PUSH == 'true' && format('type=gha,scope={0},mode=max', matrix.image) || '' }}
