@@ -1,0 +1,156 @@
+name: Images
+
+# Builds the Harbor images whose Go code this fork patches and pushes them to
+# ghcr.io/<owner>/<image>. Everything else (portal, db, redis/valkey, nginx,
+# registry, registryctl, trivy-adapter) keeps using the upstream images.
+#
+# The images are produced from the upstream make/photon/<component>/Dockerfile
+# on top of the upstream goharbor/harbor-<component>-base image, so they are
+# drop-in replacements for the goharbor/* images used by the Helm chart.
+
+on:
+  push:
+    branches:
+      - main
+      - 'release-*'
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch, tag or SHA) to build. Empty = the ref selected above.'
+        required: false
+        default: ''
+      base_image_tag:
+        description: 'Tag of the upstream goharbor/harbor-*-base images. Empty = VERSION file if published upstream, else "dev".'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+jobs:
+  build:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: harbor-core
+            component: core
+            make_targets: versions_prepare compile_core
+          - image: harbor-jobservice
+            component: jobservice
+            make_targets: compile_jobservice
+          # The exporter Dockerfile compiles the binary itself.
+          - image: harbor-exporter
+            component: exporter
+            make_targets: ''
+    env:
+      IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
+      INPUT_REF: ${{ inputs.ref }}
+      INPUT_BASE_TAG: ${{ inputs.base_image_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Resolve tags and base image
+        id: meta
+        run: |
+          set -euo pipefail
+          image=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          sha=$(git rev-parse --short=8 HEAD)
+          version=$(cat VERSION)
+
+          ref_name="${INPUT_REF:-$GITHUB_REF_NAME}"
+          ref_name="${ref_name#refs/heads/}"
+          ref_name="${ref_name#refs/tags/}"
+          ref_tag=$(echo "$ref_name" | sed -E 's#[^A-Za-z0-9_.-]+#-#g' | cut -c1-128)
+
+          tags="$image:$sha"
+          version_tag="$sha"
+          # A raw SHA passed as the dispatch ref is already covered by the sha tag.
+          if ! echo "$ref_name" | grep -Eq '^[0-9a-f]{7,40}$'; then
+            tags="$tags,$image:$ref_tag"
+            version_tag="$ref_tag"
+          fi
+
+          # Upstream publishes goharbor/harbor-<component>-base:<VERSION> for release
+          # branches and :dev for main. Use the VERSION tag when it exists.
+          base_ns=goharbor
+          base_repo="$base_ns/harbor-${{ matrix.component }}-base"
+          if [ -n "$INPUT_BASE_TAG" ]; then
+            base_tag="$INPUT_BASE_TAG"
+          elif docker manifest inspect "$base_repo:$version" >/dev/null 2>&1; then
+            base_tag="$version"
+          else
+            base_tag=dev
+          fi
+
+          gobuildimage=$(sed -n 's/^GOBUILDIMAGE=//p' Makefile)
+
+          {
+            echo "tags=$tags"
+            echo "sha=$sha"
+            echo "full_sha=$(git rev-parse HEAD)"
+            echo "version=$version"
+            echo "version_tag=$version_tag"
+            echo "base_ns=$base_ns"
+            echo "base_tag=$base_tag"
+            echo "gobuildimage=$gobuildimage"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### ${{ matrix.image }}"
+            echo "- commit: \`$(git rev-parse HEAD)\` (VERSION $version)"
+            echo "- base image: \`$base_repo:$base_tag\`"
+            echo "- tags: \`${tags//,/\`, \`}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Same compile path as upstream `make compile`: swagger codegen, then
+      # `go build` inside the pinned golang image with the release ldflags.
+      # -o lint_apis skips the swagger spec lint (needs a node toolchain image).
+      - name: Compile binaries
+        if: matrix.make_targets != ''
+        run: make -o lint_apis ${{ matrix.make_targets }} ARCH=amd64 VERSIONTAG=${{ steps.meta.outputs.version_tag }}
+
+      # GitHub-hosted runners ship Docker, so only Buildx is set up here (see
+      # upstream d822d80c2: installing a different Docker broke Buildx).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: make/photon/${{ matrix.component }}/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            harbor_base_namespace=${{ steps.meta.outputs.base_ns }}
+            harbor_base_image_version=${{ steps.meta.outputs.base_tag }}
+            build_image=${{ steps.meta.outputs.gobuildimage }}
+            harbor_version=${{ steps.meta.outputs.version }}
+            git_commit=${{ steps.meta.outputs.sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.full_sha }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version_tag }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
