@@ -1,0 +1,56 @@
+name: Trivy Nightly Scan
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+  security-events: write
+
+jobs:
+  scan:
+    name: ${{ matrix.image }}:${{ matrix.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        tag: [main, release-2.16-patched]
+        image: [harbor-core, harbor-jobservice, harbor-portal, harbor-registryctl, registry-photon]
+    steps:
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve image
+        id: ref
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ matrix.tag }}
+        run: |
+          image=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          if docker manifest inspect "$image" >/dev/null 2>&1; then
+            echo "image=$image" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$image not found, skipping"
+          fi
+      - name: Run Trivy vulnerability scanner
+        if: steps.ref.outputs.image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.ref.outputs.image }}
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-results.sarif
+        env:
+          # ghcr.io often rate-limits the trivy-db pulls, see aquasecurity/trivy-action#389
+          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: steps.ref.outputs.image
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
+        with:
+          sarif_file: trivy-results.sarif
+          category: trivy-${{ matrix.image }}-${{ matrix.tag }}
