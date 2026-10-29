@@ -43,11 +43,14 @@ func (suite *DaoTestSuite) TestCreateArtifactAndBlob() {
 	artifactDigest := suite.DigestString()
 	blobDigest := suite.DigestString()
 
-	_, err := suite.dao.CreateArtifactAndBlob(ctx, artifactDigest, blobDigest)
+	id, err := suite.dao.CreateArtifactAndBlob(ctx, artifactDigest, blobDigest)
 	suite.Nil(err)
+	suite.NotZero(id)
 
-	_, err = suite.dao.CreateArtifactAndBlob(ctx, artifactDigest, blobDigest)
+	// creating the existing association returns the id of the existing one
+	id2, err := suite.dao.CreateArtifactAndBlob(ctx, artifactDigest, blobDigest)
 	suite.Nil(err)
+	suite.Equal(id, id2)
 }
 
 func (suite *DaoTestSuite) TestGetArtifactAndBlob() {
@@ -366,11 +369,87 @@ func (suite *DaoTestSuite) TestCreateProjectBlob() {
 	projectID := int64(1)
 	blobID := int64(1000)
 
-	_, err := suite.dao.CreateProjectBlob(ctx, projectID, blobID)
+	id, err := suite.dao.CreateProjectBlob(ctx, projectID, blobID)
 	suite.Nil(err)
+	suite.NotZero(id)
 
-	_, err = suite.dao.CreateProjectBlob(ctx, projectID, blobID)
+	// creating the existing association returns the id of the existing one
+	id2, err := suite.dao.CreateProjectBlob(ctx, projectID, blobID)
 	suite.Nil(err)
+	suite.Equal(id, id2)
+
+	id3, err := suite.dao.CreateProjectBlob(ctx, projectID+1, blobID)
+	suite.Nil(err)
+	suite.NotEqual(id, id3)
+}
+
+func (suite *DaoTestSuite) TestAssociateBlobsWithProject() {
+	ctx := suite.Context()
+
+	projectID := int64(1)
+
+	var digests []string
+	var blobIDs []int64
+	for range 5 {
+		digest := suite.DigestString()
+		blobID, err := suite.dao.CreateBlob(ctx, &models.Blob{Digest: digest})
+		suite.Require().Nil(err)
+		digests = append(digests, digest)
+		blobIDs = append(blobIDs, blobID)
+	}
+
+	countAssociated := func() int {
+		count := 0
+		for _, digest := range digests {
+			exist, err := suite.dao.ExistProjectBlob(ctx, projectID, digest)
+			suite.Require().Nil(err)
+			if exist {
+				count++
+			}
+		}
+		return count
+	}
+
+	suite.Run("empty input", func() {
+		suite.Nil(suite.dao.AssociateBlobsWithProject(ctx, projectID, nil))
+		suite.Nil(suite.dao.AssociateBlobsWithProject(ctx, projectID, []string{}))
+		suite.Equal(0, countAssociated())
+	})
+
+	// associate the first two blobs before the batch to cover the existing associations
+	existingID, err := suite.dao.CreateProjectBlob(ctx, projectID, blobIDs[0])
+	suite.Require().Nil(err)
+	_, err = suite.dao.CreateProjectBlob(ctx, projectID, blobIDs[1])
+	suite.Require().Nil(err)
+
+	suite.Run("missing blob", func() {
+		missing := suite.DigestString()
+		err := suite.dao.AssociateBlobsWithProject(ctx, projectID, []string{digests[2], missing, digests[3]})
+		suite.IsNotFoundErr(err)
+		suite.Contains(err.Error(), missing)
+	})
+
+	suite.Run("existing, new and duplicate digests", func() {
+		// reversed order with duplicates
+		input := []string{digests[4], digests[3], digests[4], digests[2], digests[1], digests[0], digests[0]}
+		suite.Nil(suite.dao.AssociateBlobsWithProject(ctx, projectID, input))
+		suite.Equal(len(digests), countAssociated())
+
+		// the existing association is kept
+		id, err := suite.dao.CreateProjectBlob(ctx, projectID, blobIDs[0])
+		suite.Nil(err)
+		suite.Equal(existingID, id)
+
+		// idempotent
+		suite.Nil(suite.dao.AssociateBlobsWithProject(ctx, projectID, digests))
+		suite.Equal(len(digests), countAssociated())
+	})
+
+	suite.Run("other project is not affected", func() {
+		exist, err := suite.dao.ExistProjectBlob(ctx, projectID+1, digests[0])
+		suite.Nil(err)
+		suite.False(exist)
+	})
 }
 
 func (suite *DaoTestSuite) TestExistProjectBlob() {

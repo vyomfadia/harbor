@@ -47,6 +47,10 @@ type Controller interface {
 	// AssociateWithProjectByDigest associate blob with project by blob digest
 	AssociateWithProjectByDigest(ctx context.Context, blobDigest string, projectID int64) error
 
+	// AssociateWithProjectByDigests associate blobs with project by blob digests,
+	// a not found error is returned when any of the blobs does not exist
+	AssociateWithProjectByDigests(ctx context.Context, blobDigests []string, projectID int64) error
+
 	// CalculateTotalSizeByProject returns the sum of the blob size for the project
 	CalculateTotalSizeByProject(ctx context.Context, projectID int64, excludeForeign bool) (int64, error)
 
@@ -142,6 +146,10 @@ func (c *controller) AssociateWithProjectByDigest(ctx context.Context, blobDiges
 
 	_, err = c.blobMgr.AssociateWithProject(ctx, blob.ID, projectID)
 	return err
+}
+
+func (c *controller) AssociateWithProjectByDigests(ctx context.Context, blobDigests []string, projectID int64) error {
+	return c.blobMgr.AssociateWithProjectByDigests(ctx, blobDigests, projectID)
 }
 
 func (c *controller) CalculateTotalSizeByProject(ctx context.Context, projectID int64, excludeForeign bool) (int64, error) {

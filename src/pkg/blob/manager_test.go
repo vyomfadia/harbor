@@ -82,6 +82,27 @@ func (suite *ManagerTestSuite) TestAssociateWithProject() {
 	suite.True(associated)
 }
 
+func (suite *ManagerTestSuite) TestAssociateWithProjectByDigests() {
+	ctx := suite.Context()
+
+	digest1 := suite.DigestString()
+	digest2 := suite.DigestString()
+	_, err := Mgr.Create(ctx, digest1, "media type", 100)
+	suite.Nil(err)
+	_, err = Mgr.Create(ctx, digest2, "media type", 100)
+	suite.Nil(err)
+
+	projectID := int64(1)
+
+	suite.Nil(Mgr.AssociateWithProjectByDigests(ctx, []string{digest1, digest2}, projectID))
+
+	for _, digest := range []string{digest1, digest2} {
+		associated, err := suite.isAssociatedWithProject(ctx, digest, projectID)
+		suite.Nil(err)
+		suite.True(associated)
+	}
+}
+
 func (suite *ManagerTestSuite) TestCalculateTotalSize() {
 	ctx := suite.Context()
 

@@ -87,6 +87,25 @@ func (suite *ControllerTestSuite) TestAttachToProjectByDigest() {
 	})
 }
 
+func (suite *ControllerTestSuite) TestAttachToProjectByDigests() {
+	suite.WithProject(func(projectID int64, projectName string) {
+		ctx := suite.Context()
+
+		digests := []string{suite.prepareBlob(), suite.prepareBlob(), suite.prepareBlob()}
+		suite.Nil(Ctl.AssociateWithProjectByDigest(ctx, digests[0], projectID))
+		suite.Nil(Ctl.AssociateWithProjectByDigests(ctx, digests, projectID))
+
+		for _, digest := range digests {
+			exist, err := Ctl.Exist(ctx, digest, IsAssociatedWithProject(projectID))
+			suite.Nil(err)
+			suite.True(exist)
+		}
+
+		err := Ctl.AssociateWithProjectByDigests(ctx, []string{suite.prepareBlob(), suite.DigestString()}, projectID)
+		suite.True(errors.IsNotFoundErr(err))
+	})
+}
+
 func (suite *ControllerTestSuite) TestCalculateTotalSizeByProject() {
 	suite.WithProject(func(projectID int64, projectName string) {
 		ctx := suite.Context()
