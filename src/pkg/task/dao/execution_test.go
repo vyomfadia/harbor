@@ -16,6 +16,7 @@ package dao
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -513,6 +514,56 @@ func (e *executionDAOTestSuite) TestScanAndRefreshOutdateStatus() {
 	e.Equal(job.ErrorStatus.String(), exec2.Status)
 }
 
+func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeys() {
+	e.T().Setenv("_REDIS_URL_HARBOR", "redis://localhost:6379/0")
+	client, err := libredis.GetHarborClient()
+	e.Require().NoError(err)
+
+	id, err := e.executionDAO.Create(e.ctx, &Execution{
+		VendorType: "GC",
+		Trigger:    "test",
+		ExtraAttrs: `{"key":"value"}`,
+	})
+	e.Require().NoError(err)
+	defer e.executionDAO.Delete(e.ctx, id)
+	tid, err := e.taskDao.Create(e.ctx, &Task{
+		ExecutionID: id,
+		Status:      job.SuccessStatus.String(),
+		StatusCode:  job.SuccessStatus.Code(),
+		ExtraAttrs:  `{}`,
+	})
+	e.Require().NoError(err)
+	defer e.taskDao.Delete(e.ctx, tid)
+
+	// the keys written by the previous versions
+	legacyKey := fmt.Sprintf("cache:execution:id:%d:vendor:GC:status_outdate", id)
+	invalidKey := "cache:execution:id:invalid:vendor:GC:status_outdate"
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	e.Require().NoError(client.Set(e.ctx, invalidKey, "", 0).Err())
+	defer client.Del(e.ctx, legacyKey, invalidKey)
+
+	defer func(at time.Time) { legacyExecStatusOutdateMigrateAt = at }(legacyExecStatusOutdateMigrateAt)
+	legacyExecStatusOutdateMigrated.Store(false)
+
+	// not migrated before the migration time
+	legacyExecStatusOutdateMigrateAt = time.Now().Add(time.Hour)
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal(int64(1), client.Exists(e.ctx, legacyKey).Val())
+	exec, err := e.executionDAO.Get(e.ctx, id)
+	e.Require().NoError(err)
+	e.Empty(exec.Status)
+
+	// migrated and refreshed after the migration time
+	legacyExecStatusOutdateMigrateAt = time.Now().Add(-time.Second)
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.True(legacyExecStatusOutdateMigrated.Load())
+	e.Zero(client.Exists(e.ctx, legacyKey).Val())
+	e.Equal(int64(1), client.Exists(e.ctx, invalidKey).Val())
+	exec, err = e.executionDAO.Get(e.ctx, id)
+	e.Require().NoError(err)
+	e.Equal(job.SuccessStatus.String(), exec.Status)
+}
+
 func TestExecutionDAOSuite(t *testing.T) {
 	suite.Run(t, &executionDAOTestSuite{})
 }
@@ -743,4 +794,3 @@ func TestMergeStatusMessages(t *testing.T) {
 		t.Errorf("expected truncated string <= 4096 ending with ..., got length %d", len(gotLong))
 	}
 }
-

@@ -44,7 +44,7 @@ import (
 func init() {
 	// register the async task for flushing quota to db when enable update quota by redis
 	if provider := config.GetQuotaUpdateProvider(); provider == updateQuotaProviderRedis.String() {
-		gtask.DefaultPool().AddTask(flushQuota, 30*time.Second)
+		gtask.DefaultPool().AddTask(newQuotaFlusher().flush, quotaFlushInterval())
 	}
 }
 
@@ -116,34 +116,6 @@ type controller struct {
 
 	quotaMgr quota.Manager
 	g        singleflight.Group
-}
-
-// flushQuota flushes the quota info from redis to db asynchronously.
-func flushQuota(ctx context.Context) {
-	iter, err := cache.Default().Scan(ctx, "quota:*")
-	if err != nil {
-		log.Errorf("failed to scan out the quota records from redis")
-		return
-	}
-
-	for iter.Next(ctx) {
-		key := iter.Val()
-		q := &quota.Quota{}
-		err = cache.Default().Fetch(ctx, key, q)
-		if err != nil {
-			log.Errorf("failed to fetch quota: %s, error: %v", key, err)
-			continue
-		}
-
-		if err = Ctl.Update(ctx, q); err != nil {
-			log.Errorf("failed to refresh quota: %s, error: %v", key, err)
-		} else {
-			log.Debugf("successfully refreshed quota: %s", key)
-		}
-	}
-	if err := iter.Err(); err != nil {
-		log.Errorf("failed to scan out the quota records from redis: %v", err)
-	}
 }
 
 func (c *controller) Count(ctx context.Context, query *q.Query) (int64, error) {
@@ -272,7 +244,7 @@ func (c *controller) updateUsageByRedis(ctx context.Context, reference, referenc
 	}
 	// normally use cache.Save will append prefix "cache:", in order to keep consistent
 	// here adopts raw redis client should also pad the prefix manually.
-	key := fmt.Sprintf("%s:quota:%s:%s", "cache", reference, referenceID)
+	key := fmt.Sprintf("%s%s:%s", quotaKeyPrefix, reference, referenceID)
 	return client.Watch(ctx, func(tx *redis.Tx) error {
 		data, err := tx.Get(ctx, key).Result()
 		if err != nil && !errors.Is(err, redis.Nil) {
@@ -320,8 +292,10 @@ func (c *controller) updateUsageByRedis(ctx context.Context, reference, referenc
 		}
 
 		_, err = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
-			_, err = p.Set(ctx, key, val, quotaExpireTimeout).Result()
-			return err
+			// mark it dirty in the same transaction so it is flushed to db
+			p.Set(ctx, key, val, quotaExpireTimeout)
+			p.SAdd(ctx, quotaDirtySetKey, key)
+			return nil
 		})
 
 		if err != nil && !errors.Is(err, redis.TxFailedErr) {
@@ -442,6 +416,9 @@ func (c *controller) Update(ctx context.Context, u *quota.Quota) error {
 	f := func() error {
 		q, err := c.quotaMgr.GetByRef(ctx, u.Reference, u.ReferenceID)
 		if err != nil {
+			if errors.IsNotFoundErr(err) {
+				return retry.Abort(err)
+			}
 			return err
 		}
 
