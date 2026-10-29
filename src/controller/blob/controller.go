@@ -287,51 +287,43 @@ func (c *controller) Sync(ctx context.Context, references []distribution.Descrip
 		mp[blob.Digest] = blob
 	}
 
-	var missing, updating []*blob.Blob
+	var changes []*blob.Blob
 	for _, reference := range references {
 		if exist, found := mp[reference.Digest.String()]; found {
 			if exist.ContentType != reference.MediaType {
 				exist.ContentType = reference.MediaType
-				updating = append(updating, exist)
+				changes = append(changes, exist)
 			}
 		} else {
-			missing = append(missing, &blob.Blob{
+			changes = append(changes, &blob.Blob{
 				Digest:      reference.Digest.String(),
 				ContentType: reference.MediaType,
 				Size:        reference.Size,
 			})
 		}
 	}
-
-	// consistent order to avoid deadlocks between concurrent syncs of the same blobs
-	sort.Slice(updating, func(i, j int) bool { return updating[i].Digest < updating[j].Digest })
-	sort.Slice(missing, func(i, j int) bool { return missing[i].Digest < missing[j].Digest })
-
-	if len(updating) > 0 {
-		err := orm.WithTransaction(func(ctx context.Context) error {
-			for _, blob := range updating {
-				if err := c.Update(ctx, blob); err != nil {
-					log.G(ctx).Warningf("Failed to update blob %s, error: %v", blob.Digest, err)
-					return err
-				}
-			}
-
-			return nil
-		})(orm.SetTransactionOpNameToContext(ctx, "tx-sync-blob"))
-		if err != nil {
-			return err
-		}
+	if len(changes) == 0 {
+		return nil
 	}
 
-	if len(missing) > 0 {
-		for _, blob := range missing {
-			if _, err := c.blobMgr.Create(ctx, blob.Digest, blob.ContentType, blob.Size); err != nil {
+	// creates and updates lock the rows until the transaction ends, apply them in one consistent
+	// order to avoid deadlocks between concurrent syncs of the same blobs
+	sort.Slice(changes, func(i, j int) bool { return changes[i].Digest < changes[j].Digest })
+
+	return orm.WithTransaction(func(ctx context.Context) error {
+		for _, blob := range changes {
+			if blob.ID == 0 {
+				if _, err := c.blobMgr.Create(ctx, blob.Digest, blob.ContentType, blob.Size); err != nil {
+					return err
+				}
+			} else if err := c.Update(ctx, blob); err != nil {
+				log.G(ctx).Warningf("Failed to update blob %s, error: %v", blob.Digest, err)
 				return err
 			}
 		}
-	}
 
-	return nil
+		return nil
+	})(orm.SetTransactionOpNameToContext(ctx, "tx-sync-blob"))
 }
 
 func (c *controller) SetAcceptedBlobSize(ctx context.Context, sessionID string, size int64) error {
