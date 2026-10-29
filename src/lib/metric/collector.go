@@ -107,8 +107,8 @@ var (
 		},
 		[]string{"result"})
 
-	// SessionCreatedTotal used to collect the total number of sessions persisted to the session storage
-	// SessionCreatedTotal collects the total number of sessions persisted to the session storage
+	// SessionCreatedTotal collects the total number of sessions persisted to the session storage.
+	// It's approximate: concurrent requests storing the same new session may each count it.
 	SessionCreatedTotal = prometheus.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: os.Getenv(NamespaceEnvKey),
