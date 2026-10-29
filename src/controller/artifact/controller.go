@@ -494,15 +494,16 @@ func (c *controller) deleteDeeply(ctx context.Context, id int64, isRoot, isAcces
 }
 
 func (c *controller) Copy(ctx context.Context, srcRepo, reference, dstRepo string) (int64, error) {
-	dstAccs := make([]*accessorymodel.AccessoryData, 0)
-	return c.copyDeeply(ctx, srcRepo, reference, dstRepo, true, false, &dstAccs)
+	return c.copyDeeply(ctx, srcRepo, reference, dstRepo, true, false)
 }
 
 // as we call the docker registry APIs in the registry client directly,
 // this bypass our own logic(ensure, fire event, etc.) inside the registry handlers,
 // these logic must be covered explicitly here.
 // "copyDeeply" iterates the child artifacts and copy them first
-func (c *controller) copyDeeply(ctx context.Context, srcRepo, reference, dstRepo string, isRoot, isAcc bool, dstAccs *[]*accessorymodel.AccessoryData) (int64, error) {
+func (c *controller) copyDeeply(ctx context.Context, srcRepo, reference, dstRepo string, isRoot, isAcc bool) (int64, error) {
+	// the accessories of this artifact only, not of its children
+	var dstAccs []*accessorymodel.AccessoryData
 	var option *Option
 	option = &Option{WithTag: true, WithAccessory: true}
 	if isAcc {
@@ -533,7 +534,7 @@ func (c *controller) copyDeeply(ctx context.Context, srcRepo, reference, dstRepo
 	// the artifact doesn't exist under the destination repository, continue to copy
 	// copy child artifacts if contains any
 	for _, reference := range srcArt.References {
-		if _, err = c.copyDeeply(ctx, srcRepo, reference.ChildDigest, dstRepo, false, false, dstAccs); err != nil {
+		if _, err = c.copyDeeply(ctx, srcRepo, reference.ChildDigest, dstRepo, false, false); err != nil {
 			return 0, err
 		}
 	}
@@ -548,8 +549,7 @@ func (c *controller) copyDeeply(ctx context.Context, srcRepo, reference, dstRepo
 		// to avoid infinite recursion, disable this part in UT.
 		if os.Getenv("UTTEST") != "true" {
 			if len(accs) > 0 {
-				tmpDstAccs := make([]*accessorymodel.AccessoryData, 0)
-				_, err = c.copyDeeply(ctx, srcRepo, acc.GetData().Digest, dstRepo, true, false, &tmpDstAccs)
+				_, err = c.copyDeeply(ctx, srcRepo, acc.GetData().Digest, dstRepo, true, false)
 				if err != nil {
 					return 0, err
 				}
@@ -560,8 +560,8 @@ func (c *controller) copyDeeply(ctx context.Context, srcRepo, reference, dstRepo
 			Type:   acc.GetData().Type,
 			Size:   acc.GetData().Size,
 		}
-		*dstAccs = append(*dstAccs, dstAcc)
-		id, err := c.copyDeeply(ctx, srcRepo, acc.GetData().Digest, dstRepo, false, true, dstAccs)
+		dstAccs = append(dstAccs, dstAcc)
+		id, err := c.copyDeeply(ctx, srcRepo, acc.GetData().Digest, dstRepo, false, true)
 		if err != nil {
 			return 0, err
 		}
@@ -584,7 +584,7 @@ ensureArt:
 		Tags: tags,
 	}
 	if !isAcc {
-		artopt.Accs = *dstAccs
+		artopt.Accs = dstAccs
 	}
 	_, id, err := c.Ensure(ctx, dstRepo, digest, artopt)
 	if err != nil {
