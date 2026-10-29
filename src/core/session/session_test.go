@@ -17,14 +17,27 @@ package session
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/beego/beego/v2/server/web/session"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/suite"
 
+	"github.com/goharbor/harbor/src/lib"
+	"github.com/goharbor/harbor/src/lib/cache/redis"
 	"github.com/goharbor/harbor/src/lib/config"
+	"github.com/goharbor/harbor/src/lib/metric"
 	_ "github.com/goharbor/harbor/src/pkg/config/db"
 	_ "github.com/goharbor/harbor/src/pkg/config/inmemory"
 )
+
+const redisURL = "redis://127.0.0.1:6379/0"
+
+func sessionCreated() float64 {
+	m := &dto.Metric{}
+	_ = metric.SessionCreatedTotal.Write(m)
+	return m.GetCounter().GetValue()
+}
 
 type sessionTestSuite struct {
 	suite.Suite
@@ -40,7 +53,7 @@ func (s *sessionTestSuite) SetupSuite() {
 	s.NoError(err, "should get harbor provider")
 	s.NotNil(s.provider, "provider should not nil")
 
-	err = s.provider.SessionInit(context.Background(), 3600, "redis://127.0.0.1:6379/0")
+	err = s.provider.SessionInit(context.Background(), 3600, redisURL)
 	s.NoError(err, "session init should not error")
 }
 
@@ -56,6 +69,7 @@ func (s *sessionTestSuite) TestSessionExist() {
 	store, err := s.provider.SessionRead(ctx, "session-001")
 	s.NoError(err, "session read should not error")
 	s.NotNil(store)
+	s.NoError(store.Set(ctx, "key", "value"))
 	store.SessionRelease(context.Background(), nil)
 
 	defer func() {
@@ -77,6 +91,7 @@ func (s *sessionTestSuite) TestSessionRegenerate() {
 	store, err := s.provider.SessionRead(ctx, "session-001")
 	s.NoError(err, "session read should not error")
 	s.NotNil(store)
+	s.NoError(store.Set(ctx, "key", "value"))
 	store.SessionRelease(ctx, nil)
 
 	defer func() {
@@ -97,8 +112,12 @@ func (s *sessionTestSuite) TestSessionRegenerate() {
 	s.True(s.provider.SessionExist(ctx, "session-003"))
 	s.False(s.provider.SessionExist(ctx, "session-001"))
 
-	_, err = s.provider.SessionRegenerate(ctx, "session-001", "session-004")
+	// the old session doesn't exist, the new one isn't persisted until it holds data
+	store, err = s.provider.SessionRegenerate(ctx, "session-001", "session-004")
 	s.NoError(err, "session regenerate should not error")
+	s.False(s.provider.SessionExist(ctx, "session-004"))
+	s.NoError(store.Set(ctx, "key", "value"))
+	store.SessionRelease(ctx, nil)
 	s.True(s.provider.SessionExist(ctx, "session-004"))
 }
 
@@ -108,6 +127,7 @@ func (s *sessionTestSuite) TestSessionDestroy() {
 	store, err := s.provider.SessionRead(ctx, "session-004")
 	s.NoError(err, "session read should not error")
 	s.NotNil(store)
+	s.NoError(store.Set(ctx, "key", "value"))
 	store.SessionRelease(ctx, nil)
 	isExist, _ := s.provider.SessionExist(ctx, "session-004")
 	s.True(isExist, "session-004 should exist")
@@ -116,6 +136,56 @@ func (s *sessionTestSuite) TestSessionDestroy() {
 	s.NoError(err, "session destroy should not error")
 	isExist, _ = s.provider.SessionExist(ctx, "session-004")
 	s.False(isExist, "session-004 should not exist")
+}
+
+func (s *sessionTestSuite) TestReleaseNewEmptySession() {
+	ctx := context.Background()
+	created := sessionCreated()
+
+	store, err := s.provider.SessionRead(ctx, "session-005")
+	s.NoError(err)
+	store.SessionRelease(ctx, nil)
+	store.SessionReleaseIfPresent(ctx, nil)
+	exist, _ := s.provider.SessionExist(ctx, "session-005")
+	s.False(exist, "empty new session should not be persisted")
+	s.Equal(created, sessionCreated())
+}
+
+func (s *sessionTestSuite) TestReleaseNewSessionWithData() {
+	ctx := context.Background()
+	defer s.provider.SessionDestroy(ctx, "session-006")
+	created := sessionCreated()
+
+	store, err := s.provider.SessionRead(ctx, "session-006")
+	s.NoError(err)
+	s.NoError(store.Set(ctx, "key", "value"))
+	store.SessionRelease(ctx, nil)
+	// releasing again must not count the session twice
+	store.SessionRelease(ctx, nil)
+	s.True(s.provider.SessionExist(ctx, "session-006"))
+	s.Equal(created+1, sessionCreated())
+
+	// a persisted session is still saved after its data is removed
+	store, err = s.provider.SessionRead(ctx, "session-006")
+	s.NoError(err)
+	s.NoError(store.Flush(ctx))
+	store.SessionRelease(ctx, nil)
+	s.True(s.provider.SessionExist(ctx, "session-006"))
+	s.Equal(created+1, sessionCreated())
+}
+
+func (s *sessionTestSuite) TestReleaseNewSessionSkipRenewal() {
+	ctx := lib.WithSkipSessionRenewal(context.Background(), true)
+	defer s.provider.SessionDestroy(ctx, "session-007")
+
+	store, err := s.provider.SessionRead(ctx, "session-007")
+	s.NoError(err)
+	s.NoError(store.Set(ctx, "key", "value"))
+	store.SessionRelease(ctx, nil)
+	// a new session must get an expiration even if the renewal is skipped
+	ttl, err := store.(*Store).c.(*redis.Cache).Client.TTL(ctx, "session-007").Result()
+	s.NoError(err)
+	s.Greater(ttl, time.Duration(0))
 }
 
 func (s *sessionTestSuite) TestSessionGC() {
