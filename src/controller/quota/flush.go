@@ -16,6 +16,7 @@ package quota
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -45,6 +46,7 @@ const (
 	// quotaFlushLockTTL is extended periodically while flushing
 	quotaFlushLockTTL         = time.Minute
 	quotaFlushBatchSize       = 100
+	quotaFlushWorkers         = 8
 	defaultQuotaFlushInterval = 30 * time.Second
 	// maxQuotaFlushInterval is half of quotaExpireTimeout, quotas must be flushed before they expire
 	maxQuotaFlushInterval = 150 * time.Second
@@ -133,6 +135,7 @@ type quotaFlusher struct {
 	update     func(ctx context.Context, q *quota.Quota) error
 	lockTTL    time.Duration
 	batchSize  int64
+	workers    int
 	keyTimeout time.Duration
 	// legacySweepEnd is the end of the legacy sweep window of this instance
 	legacySweepEnd time.Time
@@ -146,6 +149,7 @@ func newQuotaFlusher() *quotaFlusher {
 		},
 		lockTTL:        quotaFlushLockTTL,
 		batchSize:      quotaFlushBatchSize,
+		workers:        quotaFlushWorkers,
 		keyTimeout:     quotaFlushKeyTimeout,
 		legacySweepEnd: time.Now().Add(legacySweepDuration),
 	}
@@ -219,6 +223,20 @@ func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, token st
 		return
 	}
 
+	var (
+		mu      sync.Mutex
+		retries []string
+	)
+	// put back at the end of the round, so that failed keys are not claimed again in place of the others
+	defer func() {
+		if len(retries) == 0 {
+			return
+		}
+		if err := requeue(context.WithoutCancel(ctx), client, retries); err != nil {
+			log.Errorf("failed to put %d keys back to the quota dirty set, error: %v", len(retries), err)
+		}
+	}()
+
 	for pending > 0 && !lost.Load() {
 		keys, err := claimScript.Run(ctx, client, scriptKeys, token, min(pending, f.batchSize)).StringSlice()
 		if err != nil {
@@ -231,35 +249,46 @@ func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, token st
 		}
 		pending -= int64(len(keys))
 
-		var retries []string
-		for i, key := range keys {
-			if lost.Load() {
-				// the lock is lost, give the remaining keys back for the next holder
-				retries = append(retries, keys[i:]...)
-				break
-			}
-			if err := f.flushKey(ctx, client, key); err != nil {
-				log.Errorf("failed to flush quota %s, error: %v", key, err)
-				retries = append(retries, key)
-				failed++
-				continue
-			}
-			flushed++
-			// a failed ack leaves the key in the flushing set, it is flushed again in the next round
-			res, err := ackScript.Run(context.WithoutCancel(ctx), client, scriptKeys, token, key).Int()
-			if err != nil {
-				log.Errorf("failed to remove quota %s from the flushing set, error: %v", key, err)
-			} else if res < 0 {
-				log.Warningf("lost the quota flush lock while flushing quota %s, stop flushing", key)
-				lost.Store(true)
-			}
+		// concurrently, so that the timeouts of slow quotas do not add up until the others expire
+		var wg sync.WaitGroup
+		queue := make(chan string)
+		for range min(f.workers, len(keys)) {
+			wg.Go(func() {
+				for key := range queue {
+					if lost.Load() {
+						// the lock is lost, give the key back for the next holder
+						mu.Lock()
+						retries = append(retries, key)
+						mu.Unlock()
+						continue
+					}
+					if err := f.flushKey(ctx, client, key); err != nil {
+						log.Errorf("failed to flush quota %s, error: %v", key, err)
+						mu.Lock()
+						retries = append(retries, key)
+						failed++
+						mu.Unlock()
+						continue
+					}
+					mu.Lock()
+					flushed++
+					mu.Unlock()
+					// a failed ack leaves the key in the flushing set, it is flushed again in the next round
+					res, err := ackScript.Run(context.WithoutCancel(ctx), client, scriptKeys, token, key).Int()
+					if err != nil {
+						log.Errorf("failed to remove quota %s from the flushing set, error: %v", key, err)
+					} else if res < 0 {
+						log.Warningf("lost the quota flush lock while flushing quota %s, stop flushing", key)
+						lost.Store(true)
+					}
+				}
+			})
 		}
-
-		if len(retries) > 0 {
-			if err := requeue(context.WithoutCancel(ctx), client, retries); err != nil {
-				log.Errorf("failed to put %d keys back to the quota dirty set, error: %v", len(retries), err)
-			}
+		for _, key := range keys {
+			queue <- key
 		}
+		close(queue)
+		wg.Wait()
 	}
 
 	return

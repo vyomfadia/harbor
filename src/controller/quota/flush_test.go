@@ -80,6 +80,7 @@ func (s *FlushTestSuite) newFlusher(update func(ctx context.Context, q *quota.Qu
 		update:     update,
 		lockTTL:    quotaFlushLockTTL,
 		batchSize:  quotaFlushBatchSize,
+		workers:    quotaFlushWorkers,
 		keyTimeout: quotaFlushKeyTimeout,
 		// out of the legacy sweep window
 		legacySweepEnd: time.Now(),
@@ -105,6 +106,10 @@ func (s *FlushTestSuite) flushed(referenceID string) (int64, bool) {
 }
 
 func (s *FlushTestSuite) setQuota(referenceID string, used int64, dirty bool) string {
+	return s.setQuotaWithTTL(referenceID, used, dirty, time.Minute)
+}
+
+func (s *FlushTestSuite) setQuotaWithTTL(referenceID string, used int64, dirty bool, ttl time.Duration) string {
 	key := fmt.Sprintf("%smock:%s", quotaKeyPrefix, referenceID)
 	q := &quota.Quota{Reference: "mock", ReferenceID: referenceID}
 	q.SetHard(types.ResourceList{types.ResourceStorage: 1000})
@@ -112,7 +117,7 @@ func (s *FlushTestSuite) setQuota(referenceID string, used int64, dirty bool) st
 	val, err := cache.DefaultCodec().Encode(q)
 	s.Require().NoError(err)
 	_, err = s.client.TxPipelined(s.ctx, func(p redis.Pipeliner) error {
-		p.Set(s.ctx, key, val, time.Minute)
+		p.Set(s.ctx, key, val, ttl)
 		if dirty {
 			p.SAdd(s.ctx, quotaDirtySetKey, key)
 		}
@@ -274,6 +279,7 @@ func (s *FlushTestSuite) TestConcurrentFlushers() {
 	newFlusher := func() *quotaFlusher {
 		f := s.newFlusher(update)
 		f.batchSize = 10
+		f.workers = 1
 		return f
 	}
 
@@ -355,13 +361,22 @@ func (s *FlushTestSuite) TestCrashedFlushIsRecovered() {
 	}
 
 	// the flusher dies after claiming the keys and before flushing any of them
+	s.Require().NoError(claimScript.Load(s.ctx, s.client).Err())
+	client := redis.NewClient(&redis.Options{Addr: s.client.Options().Addr, DB: s.client.Options().DB})
+	defer client.Close()
+	client.AddHook(&afterHook{
+		match: isClaim,
+		after: func() error {
+			runtime.Goexit()
+			return nil
+		},
+	})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.newFlusher(func(context.Context, *quota.Quota) error {
-			runtime.Goexit()
-			return nil
-		}).flush(s.ctx)
+		f := s.newFlusher(nil)
+		f.getClient = func() (*redis.Client, error) { return client, nil }
+		f.flush(s.ctx)
 	}()
 	<-done
 	s.Empty(s.dirtyKeys())
@@ -456,6 +471,41 @@ func (s *FlushTestSuite) TestSlowQuotaDoesNotExpireOthers() {
 	s.Equal([]string{slowKey}, s.dirtyKeys(), "the slow quota should be retried")
 }
 
+func (s *FlushTestSuite) TestTimeoutsDoNotExpireOthers() {
+	// the per quota timeout and the ttl keep the production ratio of 5s to 5m,
+	// more than 60 timeouts in a row would let the remaining quotas expire
+	slow := map[string]bool{}
+	for i := range 100 {
+		id := uuid.NewString()
+		slow[id] = true
+		s.setQuotaWithTTL(id, int64(i), true, 3*time.Second)
+	}
+	fast := make([]string, 0, 20)
+	for i := range 20 {
+		id := uuid.NewString()
+		fast = append(fast, id)
+		s.setQuotaWithTTL(id, int64(i), true, 3*time.Second)
+	}
+
+	f := s.newFlusher(func(ctx context.Context, q *quota.Quota) error {
+		if slow[q.ReferenceID] {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return s.record(ctx, q)
+	})
+	f.keyTimeout = 50 * time.Millisecond
+	f.flush(s.ctx)
+
+	for i, id := range fast {
+		used, ok := s.flushed(id)
+		s.True(ok, "the quota should be flushed before it expires")
+		s.Equal(int64(i), used)
+	}
+	s.Len(s.dirtyKeys(), 100, "the slow quotas should be retried")
+	s.Empty(s.flushingKeys())
+}
+
 func (s *FlushTestSuite) TestUpdateStopsRetryingWhenContextDone() {
 	mgr := &quotatesting.Manager{}
 	ctl := &controller{quotaMgr: mgr}
@@ -478,7 +528,7 @@ func (s *FlushTestSuite) TestUpdateStopsRetryingWhenContextDone() {
 }
 
 func (s *FlushTestSuite) TestStopWhenLockLost() {
-	for range 10 {
+	for range 20 {
 		s.setQuota(uuid.NewString(), 1, true)
 	}
 
@@ -487,17 +537,18 @@ func (s *FlushTestSuite) TestStopWhenLockLost() {
 		if calls.Add(1) == 1 {
 			// another instance takes over the lock, e.g. after the lock expired
 			s.client.Set(s.ctx, quotaFlushLockKey, "other", time.Minute)
-			time.Sleep(200 * time.Millisecond)
 		}
+		time.Sleep(200 * time.Millisecond)
 		return nil
 	})
 	f.lockTTL = 150 * time.Millisecond
+	f.workers = 4
 	f.flush(s.ctx)
 
-	s.Equal(int32(1), calls.Load())
-	// the keys not flushed are put back, and the flushed one is marked dirty again
-	// as it may have overwritten the value written by the new holder
-	s.Len(s.dirtyKeys(), 10)
+	s.Equal(int32(4), calls.Load(), "no quota should be flushed after the lock is lost")
+	// the keys not flushed are put back, and the flushed ones are marked dirty again
+	// as they may have overwritten the values written by the new holder
+	s.Len(s.dirtyKeys(), 20)
 	// the lock of others is not released
 	s.Equal("other", s.client.Get(s.ctx, quotaFlushLockKey).Val())
 }
