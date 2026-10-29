@@ -15,9 +15,11 @@
 package blob
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/goharbor/harbor/src/lib/log"
+	"github.com/goharbor/harbor/src/lib/orm"
 	"github.com/goharbor/harbor/src/pkg/distribution"
 	"github.com/goharbor/harbor/src/server/middleware"
 )
@@ -46,11 +48,15 @@ func PostInitiateBlobUploadMiddleware() func(http.Handler) http.Handler {
 			return err
 		}
 
-		if err := blobController.AssociateWithProjectByDigest(ctx, mount, project.ProjectID); err != nil {
-			logger.Errorf("mount blob %s to project %s failed, error: %v", mount, project.Name, err)
-			return err
-		}
+		// the request isn't in the global transaction, see dbTxSkippers in src/core/middlewares
+		ctx = log.WithLogger(ctx, logger.WithFields(log.Fields{"project": project.Name, "digest": mount}))
+		return orm.WithRetryableTransaction(func(ctx context.Context) error {
+			if err := blobController.AssociateWithProjectByDigest(ctx, mount, project.ProjectID); err != nil {
+				logger.Errorf("mount blob %s to project %s failed, error: %v", mount, project.Name, err)
+				return err
+			}
 
-		return nil
+			return nil
+		})(orm.SetTransactionOpNameToContext(ctx, "tx-mount-blob-mw"))
 	})
 }

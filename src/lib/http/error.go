@@ -51,6 +51,11 @@ var (
 // an error array as the error payload and returns the code and payload to the response.
 // And the error is logged as well
 func SendError(w http.ResponseWriter, err error) {
+	// let the response writer know the cause, e.g. the transaction middleware
+	// inspects it to decide whether the request can be retried
+	if recorder, ok := w.(interface{ RecordError(error) }); ok {
+		recorder.RecordError(err)
+	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	statusCode, errPayload, stackTrace := apiError(err)
 	// the error detail is logged only, and will not be sent to the client to avoid leaking server information

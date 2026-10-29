@@ -25,6 +25,7 @@ import (
 	"github.com/goharbor/harbor/src/server/middleware/quota"
 	"github.com/goharbor/harbor/src/server/middleware/repoproxy"
 	"github.com/goharbor/harbor/src/server/middleware/subject"
+	"github.com/goharbor/harbor/src/server/middleware/transaction"
 	"github.com/goharbor/harbor/src/server/middleware/v2auth"
 	"github.com/goharbor/harbor/src/server/middleware/vulnerable"
 	"github.com/goharbor/harbor/src/server/router"
@@ -78,9 +79,14 @@ func RegisterRoutes() {
 		Middleware(repoproxy.DisableBlobAndManifestUploadMiddleware()).
 		Middleware(immutable.Middleware()).
 		Middleware(quota.PutManifestMiddleware()).
+		Middleware(blob.PutManifestProbeMiddleware()).
+		Middleware(proxyManifest()).
+		// the request is not in the global transaction, the database work
+		// done after the registry accepted the manifest is in this one
+		Middleware(transaction.RetryableMiddleware("tx-put-manifest")).
 		Middleware(cosign.SignatureMiddleware()).
 		Middleware(subject.Middleware()).
-		Middleware(blob.PutManifestMiddleware()).
+		Middleware(blob.PutManifestSyncMiddleware()).
 		HandlerFunc(putManifest)
 	// blob head
 	root.NewRoute().

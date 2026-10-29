@@ -28,6 +28,7 @@ type ResponseBuffer struct {
 	buffer      bytes.Buffer
 	wroteHeader bool
 	flushed     bool
+	err         error
 }
 
 // NewResponseBuffer creates a ResponseBuffer object
@@ -76,6 +77,11 @@ func (r *ResponseBuffer) Flush() (int, error) {
 			header.Add(k, v)
 		}
 	}
+	if r.err != nil {
+		if recorder, ok := r.w.(errorRecorder); ok {
+			recorder.RecordError(r.err)
+		}
+	}
 	if r.code > 0 {
 		r.w.WriteHeader(r.code)
 	}
@@ -95,6 +101,7 @@ func (r *ResponseBuffer) Reset() error {
 	}
 
 	r.code = 0
+	r.err = nil
 	r.wroteHeader = false
 	r.header = http.Header{}
 	r.buffer = bytes.Buffer{}
@@ -110,4 +117,19 @@ func (r *ResponseBuffer) StatusCode() int {
 		return http.StatusOK
 	}
 	return r.code
+}
+
+// RecordError records the error that the response is rendered from, so that
+// the middlewares wrapping the handler can inspect why the request failed
+func (r *ResponseBuffer) RecordError(err error) {
+	r.err = err
+}
+
+// Err returns the error recorded by RecordError, if any
+func (r *ResponseBuffer) Err() error {
+	return r.err
+}
+
+type errorRecorder interface {
+	RecordError(err error)
 }

@@ -53,9 +53,15 @@ var (
 	// until the API finished, this behavior may eat all the database connections.
 	// There are no database writing operations in the PATCH Blob APIs, so skip the transaction middleware is all ok.
 	// For the PUT Blob Upload API, we will make a transaction manually to write blob info to the database when put blob upload successfully.
+	// The PUT Manifest and POST Initiate Blob Upload (mount) APIs are skipped for the same reason: they proxy the request to
+	// the registry, and holding a transaction across the round-trip keeps its row locks (e.g. on project_blob, blob and quota_usage)
+	// held for the duration and amplifies lock contention and deadlocks between concurrent pushes. Their database writes made after
+	// the registry accepted the request run in their own transactions, see the routes in src/server/registry.
 	dbTxSkippers = []middleware.Skipper{
 		middleware.MethodAndPathSkipper(http.MethodPatch, distribution.BlobUploadURLRegexp),
 		middleware.MethodAndPathSkipper(http.MethodPut, distribution.BlobUploadURLRegexp),
+		middleware.MethodAndPathSkipper(http.MethodPut, distribution.ManifestURLRegexp),
+		middleware.MethodAndPathSkipper(http.MethodPost, distribution.InitiateBlobUploadRegexp),
 		middleware.MethodAndPathSkipper(http.MethodPost, match("^/service/token")),
 		func(r *http.Request) bool { // skip tx for GET, HEAD and Options requests
 			m := r.Method

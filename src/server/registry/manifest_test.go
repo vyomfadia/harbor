@@ -177,7 +177,7 @@ func (m *manifestTestSuite) TestPutManifest() {
 	*req = *(req.WithContext(context.WithValue(req.Context(), router.ContextKeyInput{}, input)))
 	w := &httptest.ResponseRecorder{}
 	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
-	putManifest(w, req)
+	servePutManifest(w, req)
 	m.Equal(http.StatusInternalServerError, w.Code)
 
 	m.SetupTest()
@@ -200,7 +200,7 @@ func (m *manifestTestSuite) TestPutManifest() {
 	w = &httptest.ResponseRecorder{}
 	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
 	mock.OnAnything(m.artCtl, "Ensure").Return(true, int64(1), nil)
-	putManifest(w, req)
+	servePutManifest(w, req)
 	m.Equal(http.StatusCreated, w.Code)
 }
 
@@ -249,7 +249,7 @@ func (m *manifestTestSuite) TestPutManifestWithTagToDigestReplacement() {
 	w := &httptest.ResponseRecorder{}
 	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
 	mock.OnAnything(m.artCtl, "Ensure").Return(true, int64(1), nil)
-	putManifest(w, req)
+	servePutManifest(w, req)
 	m.Equal(http.StatusCreated, w.Code)
 	m.NotNil(proxyRequest, "Request was not captured by proxy")
 	m.Contains(proxyRequest.URL.Path, expectedDigest, "URL should contain digest")
@@ -294,7 +294,7 @@ func (m *manifestTestSuite) TestPutManifestWithDigest() {
 	w := &httptest.ResponseRecorder{}
 	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
 	mock.OnAnything(m.artCtl, "Ensure").Return(true, int64(1), nil)
-	putManifest(w, req)
+	servePutManifest(w, req)
 	m.Equal(http.StatusCreated, w.Code)
 	m.NotNil(proxyRequest, "Request was not captured by proxy")
 	m.Contains(proxyRequest.URL.Path, providedDigest, "URL should contain original digest")
@@ -318,7 +318,7 @@ func (m *manifestTestSuite) TestPutManifestEmptyBody() {
 	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
 	mock.OnAnything(m.artCtl, "Ensure").Return(true, int64(1), nil)
 
-	putManifest(w, req)
+	servePutManifest(w, req)
 	m.Equal(http.StatusCreated, w.Code)
 }
 
@@ -341,7 +341,7 @@ func (m *manifestTestSuite) TestPutManifestOversizedTagReturns413() {
 	w := &httptest.ResponseRecorder{}
 	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
 
-	putManifest(w, req)
+	servePutManifest(w, req)
 	m.Equal(http.StatusRequestEntityTooLarge, w.Code)
 	m.False(proxyCalled, "over-limit manifest must not reach the backend proxy")
 }
@@ -370,9 +370,81 @@ func (m *manifestTestSuite) TestPutManifestOversizedDigestProxied() {
 	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
 	mock.OnAnything(m.artCtl, "Ensure").Return(true, int64(1), nil)
 
-	putManifest(w, req)
+	servePutManifest(w, req)
 	m.Equal(http.StatusCreated, w.Code)
 	m.True(proxyCalled, "digest push is proxied unread by the handler")
+}
+
+// servePutManifest serves the request like the route of PUT manifest without
+// the middlewares between proxyManifest and putManifest
+func servePutManifest(w http.ResponseWriter, req *http.Request) {
+	proxyManifest()(http.HandlerFunc(putManifest)).ServeHTTP(w, req)
+}
+
+func (m *manifestTestSuite) TestPutManifestNotEnsuredWhenRegistryFails() {
+	proxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":[{"code":"MANIFEST_BLOB_UNKNOWN"}]}`))
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/v2/library/hello-world/manifests/latest", bytes.NewReader([]byte(`{"schemaVersion":2}`)))
+	input := &beegocontext.BeegoInput{}
+	input.SetParam(":splat", "library/hello-world")
+	input.SetParam(":reference", "latest")
+	*req = *(req.WithContext(context.WithValue(req.Context(), router.ContextKeyInput{}, input)))
+
+	w := httptest.NewRecorder()
+	servePutManifest(w, req)
+	m.Equal(http.StatusBadRequest, w.Code)
+	m.Contains(w.Body.String(), "MANIFEST_BLOB_UNKNOWN")
+	// nothing is recorded in the database when the registry rejects the manifest
+	m.repoCtl.AssertNotCalled(m.T(), "Ensure", mock.Anything, mock.Anything)
+	m.artCtl.AssertNotCalled(m.T(), "Ensure", mock.Anything, mock.Anything, mock.Anything, mock.Anything)
+}
+
+func (m *manifestTestSuite) TestPutManifestRequiresRegistryResponse() {
+	req := httptest.NewRequest(http.MethodPut, "/v2/library/hello-world/manifests/latest", nil)
+	w := httptest.NewRecorder()
+	putManifest(w, req)
+	m.Equal(http.StatusInternalServerError, w.Code)
+	m.repoCtl.AssertNotCalled(m.T(), "Ensure", mock.Anything, mock.Anything)
+}
+
+func (m *manifestTestSuite) TestPutManifestWritesRegistryResponse() {
+	manifestContent := []byte(`{"schemaVersion":2}`)
+	dgst := digest.FromBytes(manifestContent).String()
+	proxy = http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Docker-Content-Digest", dgst)
+		w.Header().Set("Location", "/v2/library/hello-world/manifests/"+dgst)
+		w.WriteHeader(http.StatusCreated)
+	})
+
+	req := httptest.NewRequest(http.MethodPut, "/v2/library/hello-world/manifests/latest", bytes.NewReader(manifestContent))
+	input := &beegocontext.BeegoInput{}
+	input.SetParam(":splat", "library/hello-world")
+	input.SetParam(":reference", "latest")
+	*req = *(req.WithContext(context.WithValue(req.Context(), router.ContextKeyInput{}, input)))
+
+	w := httptest.NewRecorder()
+	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
+	m.artCtl.On("Ensure", mock.Anything, "library/hello-world", dgst, &artifact.ArtOption{Tags: []string{"latest"}}).Return(true, int64(1), nil)
+	servePutManifest(w, req)
+	m.Equal(http.StatusCreated, w.Code)
+	m.Equal(dgst, w.Header().Get("Docker-Content-Digest"))
+	m.Equal("/v2/library/hello-world/manifests/"+dgst, w.Header().Get("Location"))
+	m.artCtl.AssertExpectations(m.T())
+
+	// the error of the database work is returned instead of the registry response
+	m.SetupTest()
+	req = httptest.NewRequest(http.MethodPut, "/v2/library/hello-world/manifests/latest", bytes.NewReader(manifestContent))
+	*req = *(req.WithContext(context.WithValue(req.Context(), router.ContextKeyInput{}, input)))
+	w = httptest.NewRecorder()
+	mock.OnAnything(m.repoCtl, "Ensure").Return(false, int64(1), nil)
+	mock.OnAnything(m.artCtl, "Ensure").Return(false, int64(0), errors.New("db error"))
+	servePutManifest(w, req)
+	m.Equal(http.StatusInternalServerError, w.Code)
+	m.Empty(w.Header().Get("Docker-Content-Digest"))
 }
 
 func TestManifestTestSuite(t *testing.T) {

@@ -43,6 +43,7 @@ func PutBlobUploadMiddleware() func(http.Handler) http.Handler {
 		}
 
 		ctx := r.Context()
+		ctx = log.WithLogger(ctx, log.G(ctx).WithFields(log.Fields{"url": r.URL.Path, "digest": w.Header().Get("Docker-Content-Digest")}))
 
 		h := func(ctx context.Context) error {
 			logger := log.G(ctx).WithFields(log.Fields{"middleware": "blob"})
@@ -77,7 +78,7 @@ func PutBlobUploadMiddleware() func(http.Handler) http.Handler {
 			return nil
 		}
 
-		return orm.WithTransaction(h)(orm.SetTransactionOpNameToContext(ctx, "tx-put-blob-mw"))
+		return orm.WithRetryableTransaction(h)(orm.SetTransactionOpNameToContext(ctx, "tx-put-blob-mw"))
 	})
 
 	return middleware.Chain(before, after)
