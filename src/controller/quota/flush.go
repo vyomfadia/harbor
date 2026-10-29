@@ -40,8 +40,8 @@ const (
 	// quotaFlushLockKey is the lock ensuring only one instance flushes at a time
 	quotaFlushLockKey = "quota:flush_lock"
 	// quotaFlushLockTTL is extended periodically while flushing
-	quotaFlushLockTTL = time.Minute
-	quotaFlushBatchSize = 100
+	quotaFlushLockTTL         = time.Minute
+	quotaFlushBatchSize       = 100
 	defaultQuotaFlushInterval = 30 * time.Second
 	// maxQuotaFlushInterval is half of quotaExpireTimeout, quotas must be flushed before they expire
 	maxQuotaFlushInterval = 150 * time.Second
