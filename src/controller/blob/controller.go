@@ -49,7 +49,7 @@ type Controller interface {
 	AssociateWithProjectByDigest(ctx context.Context, blobDigest string, projectID int64) error
 
 	// AssociateWithProjectByDigests associate blobs with project by blob digests,
-	// a not found error is returned when any of the blobs does not exist
+	// returns a not found error if any blob does not exist
 	AssociateWithProjectByDigests(ctx context.Context, blobDigests []string, projectID int64) error
 
 	// CalculateTotalSizeByProject returns the sum of the blob size for the project
@@ -303,8 +303,7 @@ func (c *controller) Sync(ctx context.Context, references []distribution.Descrip
 		}
 	}
 
-	// process the blobs in a consistent order to avoid deadlocks between concurrent
-	// syncs which update or create the same blobs
+	// consistent order to avoid deadlocks between concurrent syncs of the same blobs
 	sort.Slice(updating, func(i, j int) bool { return updating[i].Digest < updating[j].Digest })
 	sort.Slice(missing, func(i, j int) bool { return missing[i].Digest < missing[j].Digest })
 

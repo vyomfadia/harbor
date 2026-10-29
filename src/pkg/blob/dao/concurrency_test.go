@@ -27,8 +27,7 @@ import (
 	"github.com/goharbor/harbor/src/pkg/blob/models"
 )
 
-// associateFunc associates the blobs with the project inside the transaction carried by ctx,
-// the step is called between the statements to emulate the non-database work of a request
+// associateFunc associates the blobs with the project, step emulates the non-database work of a request
 type associateFunc func(ctx context.Context, projectID int64, digests []string, step func()) error
 
 type pushResult struct {
@@ -36,11 +35,9 @@ type pushResult struct {
 	errs      []error
 }
 
-// simulatePushes emulates concurrent manifest pushes sharing blobs: every push associates
-// a random subset of the shared blobs in a random order with the same project, and then
-// associates its own manifest blob, all in one transaction just like the request
-// transaction of the registry API. A part of the shared blobs is unassociated before
-// every round so that the pushes contend on both existing and new associations.
+// simulatePushes emulates concurrent manifest pushes sharing blobs: each push associates a random
+// subset of the shared blobs in random order, then its own manifest blob, in one transaction.
+// Some shared blobs are unassociated before each round to contend on both existing and new rows.
 func (suite *DaoTestSuite) simulatePushes(associate associateFunc, workers, rounds, shared, fresh int) pushResult {
 	ctx := suite.Context()
 	projectID := int64(rand.Int31())

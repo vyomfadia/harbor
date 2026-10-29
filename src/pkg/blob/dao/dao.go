@@ -70,9 +70,8 @@ type DAO interface {
 	// CreateProjectBlob create ProjectBlob and ignore conflict on project id and blob id
 	CreateProjectBlob(ctx context.Context, projectID, blobID int64) (int64, error)
 
-	// AssociateBlobsWithProject associates the blobs specified by the digests with the project
-	// and ignores the conflicts on project id and blob id. A not found error is returned
-	// when any of the blobs does not exist.
+	// AssociateBlobsWithProject associates the blobs with the project and ignores conflicts,
+	// a not found error is returned when any of the blobs does not exist
 	AssociateBlobsWithProject(ctx context.Context, projectID int64, blobDigests []string) error
 
 	// DeleteProjectBlob delete project blob
@@ -104,7 +103,7 @@ func (d *dao) CreateArtifactAndBlob(ctx context.Context, artifactDigest, blobDig
 		return 0, err
 	}
 
-	// ignore conflict on (digest_af, digest_blob), see CreateProjectBlob for why DO NOTHING is used
+	// see CreateProjectBlob for why DO NOTHING is used
 	var id int64
 	sql := `INSERT INTO artifact_blob (digest_af, digest_blob, creation_time) VALUES (?, ?, ?)
 ON CONFLICT (digest_af, digest_blob) DO NOTHING RETURNING id`
@@ -359,9 +358,8 @@ func (d *dao) CreateProjectBlob(ctx context.Context, projectID, blobID int64) (i
 		return 0, err
 	}
 
-	// ignore conflict on (project_id, blob_id). DO NOTHING is used instead of DO UPDATE
-	// because the latter row-locks the existing association until the end of the
-	// transaction, which leads to deadlocks between concurrent pushes sharing blobs.
+	// DO NOTHING instead of DO UPDATE, the latter row-locks the existing association until
+	// the transaction ends, which deadlocks concurrent pushes sharing blobs
 	var id int64
 	sql := `INSERT INTO project_blob (project_id, blob_id, creation_time) VALUES (?, ?, ?)
 ON CONFLICT (project_id, blob_id) DO NOTHING RETURNING id`
@@ -400,10 +398,8 @@ func (d *dao) AssociateBlobsWithProject(ctx context.Context, projectID int64, bl
 		return err
 	}
 
-	// resolve the blob ids first and insert the rows sorted by blob id: the insertion of
-	// an association which is being inserted by another in-progress transaction waits for
-	// that transaction, so concurrent transactions must insert in the same order to avoid
-	// deadlocks
+	// insert the rows sorted by blob id: inserting a row that another in-progress transaction
+	// is inserting waits for it, so concurrent transactions must use the same order to avoid deadlocks
 	var blobs []*models.Blob
 	sql := fmt.Sprintf(`SELECT id, digest FROM blob WHERE digest IN (%s) ORDER BY id`, orm.ParamPlaceholderForIn(len(digests)))
 	if _, err := o.Raw(sql, digests...).QueryRows(&blobs); err != nil {
@@ -422,7 +418,7 @@ func (d *dao) AssociateBlobsWithProject(ctx context.Context, projectID int64, bl
 		}
 	}
 
-	// ignore conflict on (project_id, blob_id), see CreateProjectBlob for why DO NOTHING is used
+	// see CreateProjectBlob for why DO NOTHING is used
 	now := time.Now()
 	values := make([]string, 0, len(blobs))
 	params := make([]any, 0, len(blobs)*3)
