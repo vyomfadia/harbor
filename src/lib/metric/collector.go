@@ -28,6 +28,8 @@ func RegisterCollectors() {
 		TotalReqDurSummary,
 		TotalProxyReq,
 		TotalProxyUpstreamReq,
+		QuotaFlushDurSummary,
+		QuotaFlushKeysTotal,
 	}...)
 }
 
@@ -83,4 +85,24 @@ var (
 			Help:      "The total number of proxy cache requests that fetched from the upstream registry (cache miss)",
 		},
 		[]string{"project", "method"})
+
+	// QuotaFlushDurSummary used to collect the duration of flushing the quota usage from redis to db
+	QuotaFlushDurSummary = prometheus.NewSummary(
+		prometheus.SummaryOpts{
+			Namespace:  os.Getenv(NamespaceEnvKey),
+			Subsystem:  os.Getenv(SubsystemEnvKey),
+			Name:       "quota_flush_duration_seconds",
+			Help:       "The time duration of flushing the quota usage from redis to db",
+			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
+		})
+
+	// QuotaFlushKeysTotal used to collect the number of quotas processed when flushing the quota usage from redis to db
+	QuotaFlushKeysTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: os.Getenv(NamespaceEnvKey),
+			Subsystem: os.Getenv(SubsystemEnvKey),
+			Name:      "quota_flush_keys_total",
+			Help:      "The total number of quotas processed when flushing the quota usage from redis to db",
+		},
+		[]string{"result"})
 )
