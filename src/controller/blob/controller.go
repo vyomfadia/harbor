@@ -17,6 +17,7 @@ package blob
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/docker/distribution"
@@ -301,6 +302,11 @@ func (c *controller) Sync(ctx context.Context, references []distribution.Descrip
 			})
 		}
 	}
+
+	// process the blobs in a consistent order to avoid deadlocks between concurrent
+	// syncs which update or create the same blobs
+	sort.Slice(updating, func(i, j int) bool { return updating[i].Digest < updating[j].Digest })
+	sort.Slice(missing, func(i, j int) bool { return missing[i].Digest < missing[j].Digest })
 
 	if len(updating) > 0 {
 		err := orm.WithTransaction(func(ctx context.Context) error {
