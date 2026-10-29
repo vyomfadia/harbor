@@ -33,7 +33,7 @@ func PutManifestMiddleware() func(http.Handler) http.Handler {
 	return middleware.Chain(PutManifestProbeMiddleware(), PutManifestSyncMiddleware())
 }
 
-// PutManifestProbeMiddleware is the part of PutManifestMiddleware which runs before the request is passed into the proxy(distribution).
+// PutManifestProbeMiddleware is the part of PutManifestMiddleware which runs before the request is proxied.
 func PutManifestProbeMiddleware() func(http.Handler) http.Handler {
 	return middleware.BeforeRequest(func(r *http.Request) error {
 		ctx := r.Context()
@@ -59,7 +59,7 @@ func PutManifestProbeMiddleware() func(http.Handler) http.Handler {
 }
 
 // PutManifestSyncMiddleware is the part of PutManifestMiddleware which runs after PUT /v2/<name>/manifests/<reference> success,
-// it only does database work, so it can run in the transaction which is started after the request was proxied.
+// it only does database work so it can run in the transaction started after the request was proxied.
 func PutManifestSyncMiddleware() func(http.Handler) http.Handler {
 	return middleware.AfterResponse(func(_ http.ResponseWriter, r *http.Request, statusCode int) error {
 		if statusCode != http.StatusCreated {

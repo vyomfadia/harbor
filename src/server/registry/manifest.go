@@ -176,14 +176,11 @@ func deleteManifest(w http.ResponseWriter, req *http.Request) {
 
 type registryResponseKey struct{}
 
-// proxyManifest proxies PUT /v2/<name>/manifests/<reference> to the backend
-// docker registry and passes the request to the next handler only when the
-// registry accepted the manifest, with the registry response in the context.
+// proxyManifest proxies PUT /v2/<name>/manifests/<reference> to the backend registry and calls
+// the next handler only when the registry accepted the manifest, with its response in the context.
 //
-// It is separated from putManifest so that the database work of the request
-// can run in a transaction that is started only after the registry returned:
-// the transaction doesn't hold its locks and database connection while waiting
-// for the registry, and can be retried as it doesn't proxy the request again.
+// It is separated from putManifest so that the database work runs in a transaction started after
+// the registry returned: it holds no locks while waiting for the registry and can be retried.
 func proxyManifest() func(http.Handler) http.Handler {
 	return middleware.New(func(w http.ResponseWriter, req *http.Request, next http.Handler) {
 		reference := router.Param(req.Context(), ":reference")
@@ -224,8 +221,7 @@ func proxyManifest() func(http.Handler) http.Handler {
 	})
 }
 
-// putManifest records the manifest accepted by the backend docker registry,
-// it must be wrapped by proxyManifest
+// putManifest records the manifest accepted by the registry, it must be wrapped by proxyManifest
 func putManifest(w http.ResponseWriter, req *http.Request) {
 	repo := router.Param(req.Context(), ":splat")
 	reference := router.Param(req.Context(), ":reference")

@@ -81,8 +81,7 @@ func RegisterRoutes() {
 		Middleware(quota.PutManifestMiddleware()).
 		Middleware(blob.PutManifestProbeMiddleware()).
 		Middleware(proxyManifest()).
-		// the request is not in the global transaction, the database work
-		// done after the registry accepted the manifest is in this one
+		// not in the global transaction, see dbTxSkippers
 		Middleware(transaction.RetryableMiddleware("tx-put-manifest")).
 		Middleware(cosign.SignatureMiddleware()).
 		Middleware(subject.Middleware()).

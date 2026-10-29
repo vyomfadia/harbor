@@ -48,7 +48,7 @@ func PostInitiateBlobUploadMiddleware() func(http.Handler) http.Handler {
 			return err
 		}
 
-		// the request isn't in the global transaction, see dbTxSkippers in src/core/middlewares
+		// not in the global transaction, see dbTxSkippers
 		ctx = log.WithLogger(ctx, logger.WithFields(log.Fields{"project": project.Name, "digest": mount}))
 		return orm.WithRetryableTransaction(func(ctx context.Context) error {
 			if err := blobController.AssociateWithProjectByDigest(ctx, mount, project.ProjectID); err != nil {

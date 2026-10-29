@@ -29,27 +29,20 @@ import (
 	"github.com/goharbor/harbor/src/lib/metric"
 )
 
-// retry tuning of the transactions aborted by a deadlock or a serialization
-// failure, they are variables so that the tests can shorten them
+// variables so that the tests can shorten them
 var (
 	txMaxAttempts  = 4
 	txRetryBackoff = 20 * time.Millisecond
 	txRetryMaxWait = 500 * time.Millisecond
 )
 
-// RetryTransaction calls run, which must execute one complete database
-// transaction, and calls it again with a small jittered backoff while it fails
-// because PostgreSQL aborted the transaction with a deadlock or a serialization
-// failure, up to a bounded number of attempts. Every retry is logged with the
-// details reported by PostgreSQL and counted in the metrics.
+// RetryTransaction calls run, which must execute one complete transaction, again with a
+// jittered backoff while PostgreSQL aborts it with a deadlock or a serialization failure,
+// up to a bounded number of attempts. run may execute several times, so it must only
+// have side effects that can be repeated.
 //
-// run may execute several times, so it must not have side effects outside of
-// the database that cannot be repeated (e.g. it must not proxy a request whose
-// body has already been consumed).
-//
-// When ctx already carries a transaction, run is called once: the transaction
-// run starts is a savepoint of the enclosing transaction, whose locks are still
-// held, so retrying only the savepoint would most likely run into the same
+// When ctx already carries a transaction, run is called once: it would be a savepoint of
+// the enclosing transaction whose locks are still held, so retrying it would most likely
 // deadlock again. Retrying is left to the owner of the enclosing transaction.
 func RetryTransaction(ctx context.Context, run func() error) error {
 	if inTransaction(ctx) {
@@ -87,15 +80,12 @@ func RetryTransaction(ctx context.Context, run func() error) error {
 	}
 }
 
-// WithRetryableTransaction is like WithTransaction, but runs f again in a new
-// transaction when the transaction is aborted by a deadlock or a serialization
-// failure, see RetryTransaction. f may run several times, so it must only do
-// database work or work that is safe to repeat.
+// WithRetryableTransaction is like WithTransaction, but runs f again in a new transaction
+// when it is aborted by a deadlock or a serialization failure, see RetryTransaction
 func WithRetryableTransaction(f func(ctx context.Context) error) func(ctx context.Context) error {
 	return func(ctx context.Context) error {
 		if !inTransaction(ctx) {
-			// mark the context as transactional so that the cached managers
-			// don't cache data of an attempt that may be rolled back
+			// keep the cached managers from caching data of an attempt that may be rolled back
 			ctx = context.WithValue(ctx, CommittedKey{}, new(bool))
 		}
 		return RetryTransaction(ctx, func() error {
@@ -113,9 +103,8 @@ func inTransaction(ctx context.Context) bool {
 	return ok
 }
 
-// txRetryDelay returns the wait before the next attempt: exponential backoff
-// capped by txRetryMaxWait with "equal jitter" so that the transactions that
-// deadlocked each other don't retry in lockstep
+// txRetryDelay returns the exponential backoff capped by txRetryMaxWait with "equal jitter",
+// so the transactions that deadlocked each other don't retry in lockstep
 func txRetryDelay(attempt int) time.Duration {
 	d := txRetryBackoff << (attempt - 1)
 	if d <= 0 || d > txRetryMaxWait {
@@ -133,9 +122,7 @@ func pgErrorCode(err error) string {
 	return ""
 }
 
-// describeTxError returns the details PostgreSQL reports for the error: for a
-// deadlock the detail lists the processes and the locks they wait for, and
-// "where" names the relation and the statement context of the victim
+// describeTxError returns the details PostgreSQL reports for the error
 func describeTxError(err error) string {
 	var pgErr *pgconn.PgError
 	if !errors.As(err, &pgErr) {

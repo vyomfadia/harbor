@@ -86,8 +86,7 @@ var (
 		},
 		[]string{"project", "method"})
 
-	// TotalDBDeadlockRetries used to collect the database transactions re-run after
-	// being aborted by a deadlock or a serialization failure
+	// TotalDBDeadlockRetries collects the transactions re-run after a deadlock or serialization failure
 	TotalDBDeadlockRetries = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: os.Getenv(NamespaceEnvKey),
@@ -97,8 +96,7 @@ var (
 		},
 		[]string{"operation", "sqlstate"})
 
-	// TotalDBDeadlockGiveUps used to collect the database transactions that were
-	// still aborted by a deadlock or a serialization failure on the last attempt
+	// TotalDBDeadlockGiveUps collects the transactions still aborted on the last attempt
 	TotalDBDeadlockGiveUps = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: os.Getenv(NamespaceEnvKey),

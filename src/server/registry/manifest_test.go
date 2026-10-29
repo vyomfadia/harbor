@@ -375,8 +375,6 @@ func (m *manifestTestSuite) TestPutManifestOversizedDigestProxied() {
 	m.True(proxyCalled, "digest push is proxied unread by the handler")
 }
 
-// servePutManifest serves the request like the route of PUT manifest without
-// the middlewares between proxyManifest and putManifest
 func servePutManifest(w http.ResponseWriter, req *http.Request) {
 	proxyManifest()(http.HandlerFunc(putManifest)).ServeHTTP(w, req)
 }

@@ -119,8 +119,7 @@ func (r *ResponseBuffer) StatusCode() int {
 	return r.code
 }
 
-// RecordError records the error that the response is rendered from, so that
-// the middlewares wrapping the handler can inspect why the request failed
+// RecordError records the error that the response is rendered from
 func (r *ResponseBuffer) RecordError(err error) {
 	r.err = err
 }

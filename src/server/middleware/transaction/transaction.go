@@ -90,8 +90,7 @@ func Middleware(skippers ...middleware.Skipper) func(http.Handler) http.Handler 
 	}, skippers...)
 }
 
-// failedResponse is returned to roll back the transaction when the response of
-// the handler is not success, the response already carries the error
+// failedResponse rolls back the transaction when the response of the handler is not success
 type failedResponse struct {
 	cause error // the error the response is rendered from, if known
 }
@@ -100,17 +99,12 @@ func (e *failedResponse) Error() string { return errNonSuccess.Error() }
 
 func (e *failedResponse) Unwrap() error { return e.cause }
 
-// RetryableMiddleware runs the request in a transaction like Middleware, and
-// runs the request again in a new transaction when the transaction is aborted
-// by a deadlock or a serialization failure, see orm.RetryTransaction. opName
-// names the transaction in the traces, the logs and the metrics.
+// RetryableMiddleware is like Middleware, but runs the request again in a new transaction when
+// it is aborted by a deadlock or a serialization failure, see orm.RetryTransaction.
 //
-// As the wrapped handlers may run several times, they must only do database
-// work or work that is safe to repeat, and must be able to re-read the request
-// body. The response and the notification events of an aborted attempt are
-// dropped. It's meant to be used at route level, after the work that must not
-// be repeated (e.g. proxying the request to the registry) has been done by the
-// outer handlers, which also keeps the transaction and its locks short.
+// The wrapped handlers may run several times, so they must only do repeatable work and be able
+// to re-read the request body. The response and notification events of an aborted attempt are
+// dropped. Use it at route level after the non-repeatable work (e.g. proxying to the registry).
 func RetryableMiddleware(opName string, skippers ...middleware.Skipper) func(http.Handler) http.Handler {
 	return middleware.New(func(w http.ResponseWriter, r *http.Request, next http.Handler) {
 		var (
@@ -132,7 +126,6 @@ func RetryableMiddleware(opName string, skippers ...middleware.Skipper) func(htt
 		}
 
 		ctx := r.Context()
-		// the url names the repository and the reference in the logs of the retries
 		txCtx := log.WithLogger(orm.SetTransactionOpNameToContext(ctx, opName),
 			log.G(ctx).WithFields(log.Fields{"method": r.Method, "url": r.URL.Path}))
 		err := orm.RetryTransaction(txCtx, func() error {

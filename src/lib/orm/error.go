@@ -94,10 +94,8 @@ func IsDuplicateKeyError(err error) bool {
 	return false
 }
 
-// IsRetryableTxError checks whether PostgreSQL aborted the transaction because
-// of a deadlock (40P01) or a serialization failure (40001). The server has
-// already rolled the transaction back in both cases, so the only way to make
-// progress is to run the whole transaction again.
+// IsRetryableTxError checks whether PostgreSQL aborted the transaction because of a
+// deadlock (40P01) or a serialization failure (40001), the whole transaction must be re-run
 func IsRetryableTxError(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
