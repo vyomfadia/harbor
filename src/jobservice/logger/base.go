@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/goharbor/harbor/src/jobservice/config"
+	"github.com/goharbor/harbor/src/jobservice/logger/backend"
 	"github.com/goharbor/harbor/src/jobservice/logger/getter"
 	"github.com/goharbor/harbor/src/jobservice/logger/sweeper"
 )
@@ -87,6 +88,13 @@ func GetLogger(loggerOptions ...Option) (Interface, error) {
 
 			// Cache it
 			singletons.Store(name, l)
+		}
+
+		// the std output logger is shared, tag its output with the key if provided
+		if sl, isStd := l.(*backend.StdOutputLogger); isStd {
+			if key := optionString(ops, "key"); len(key) > 0 {
+				l = sl.WithKey(key)
+			}
 		}
 
 		// Append to the logger list as logger entry backends
@@ -238,6 +246,9 @@ func Init(ctx context.Context) error {
 	if g != nil {
 		// Avoid data race issue
 		singletons.Store(systemKeyLogDataGetter, g)
+	} else {
+		singletons.Delete(systemKeyLogDataGetter)
+		Warningf("Job logs can not be retrieved: %s", noLogDataGetterHint)
 	}
 
 	// If sweepers configured
