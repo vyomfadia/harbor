@@ -6,6 +6,9 @@ import (
 	"path"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/goharbor/harbor/src/jobservice/config"
 	"github.com/goharbor/harbor/src/jobservice/logger/backend"
 )
@@ -42,6 +45,24 @@ func TestGetLoggerSingleStd(t *testing.T) {
 	}
 
 	l.Warningf("Verify logger testing: %s", "case_3")
+}
+
+// Test std logger tagged with the key
+func TestGetLoggerStdWithKey(t *testing.T) {
+	l, err := GetLogger(BackendOption("STD_OUTPUT", "DEBUG", map[string]any{"key": fakeJobID}))
+	require.NoError(t, err)
+	entry, ok := l.(*Entry)
+	require.True(t, ok)
+	require.Len(t, entry.loggers, 1)
+	tagged, ok := entry.loggers[0].(*backend.StdOutputLogger)
+	require.True(t, ok)
+
+	// The shared singleton must not be tagged
+	cached, ok := singletons.Load(NameStdOutput)
+	require.True(t, ok)
+	assert.NotSame(t, cached, tagged)
+
+	l.Infof("Verify logger testing: %s", "std_with_key")
 }
 
 // Test one single file logger

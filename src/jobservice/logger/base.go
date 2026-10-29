@@ -22,6 +22,7 @@ import (
 	"sync"
 
 	"github.com/goharbor/harbor/src/jobservice/config"
+	"github.com/goharbor/harbor/src/jobservice/logger/backend"
 	"github.com/goharbor/harbor/src/jobservice/logger/getter"
 	"github.com/goharbor/harbor/src/jobservice/logger/sweeper"
 )
@@ -87,6 +88,13 @@ func GetLogger(loggerOptions ...Option) (Interface, error) {
 
 			// Cache it
 			singletons.Store(name, l)
+		}
+
+		// The std output logger is shared, tag its output with the key (e.g. the job ID) if provided
+		if sl, isStd := l.(*backend.StdOutputLogger); isStd {
+			if key := optionString(ops, "key"); len(key) > 0 {
+				l = sl.WithKey(key)
+			}
 		}
 
 		// Append to the logger list as logger entry backends

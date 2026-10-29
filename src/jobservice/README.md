@@ -345,6 +345,7 @@ var knownLoggers = map[string]*Declaration{
 So far, only the following two backends are supported:
 
 * **STD_OUTPUT**: Output the log to the std stream (stdout/stderr)
+  * the log lines of a running job are prefixed with the job ID, e.g. `[<job_id>]`
 * **DB**: Output the log to the database with the table name `job_log`
   * sweeper supports
   * getter supports
