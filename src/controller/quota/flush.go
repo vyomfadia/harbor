@@ -57,6 +57,12 @@ const (
 	// apart to catch every key written by the previous versions before it expires.
 	legacySweepInterval = 2 * time.Minute
 	legacySweepDuration = 30 * time.Minute
+	// quotaLegacySweepWindowKey exists while any instance is within its legacySweepDuration, so the
+	// lock holder sweeps even if its own window has ended. It outlives the flush interval of the instances.
+	quotaLegacySweepWindowKey = "quota:legacy_sweep_window"
+	legacySweepWindowTTL      = 2 * maxQuotaFlushInterval
+	// quotaLegacySweptKey exists for legacySweepInterval after a successful sweep
+	quotaLegacySweptKey = "quota:legacy_swept"
 )
 
 var (
@@ -128,24 +134,20 @@ type quotaFlusher struct {
 	lockTTL    time.Duration
 	batchSize  int64
 	keyTimeout time.Duration
-
-	// nextLegacySweep is when the legacy quota keys are swept next, no sweep after legacySweepEnd
-	nextLegacySweep time.Time
-	legacySweepEnd  time.Time
+	// legacySweepEnd is the end of the legacy sweep window of this instance
+	legacySweepEnd time.Time
 }
 
 func newQuotaFlusher() *quotaFlusher {
-	now := time.Now()
 	return &quotaFlusher{
 		getClient: libredis.GetHarborClient,
 		update: func(ctx context.Context, q *quota.Quota) error {
 			return Ctl.Update(ctx, q)
 		},
-		lockTTL:         quotaFlushLockTTL,
-		batchSize:       quotaFlushBatchSize,
-		keyTimeout:      quotaFlushKeyTimeout,
-		nextLegacySweep: now,
-		legacySweepEnd:  now.Add(legacySweepDuration),
+		lockTTL:        quotaFlushLockTTL,
+		batchSize:      quotaFlushBatchSize,
+		keyTimeout:     quotaFlushKeyTimeout,
+		legacySweepEnd: time.Now().Add(legacySweepDuration),
 	}
 }
 
@@ -157,7 +159,11 @@ func (f *quotaFlusher) flush(ctx context.Context) {
 		return
 	}
 
-	f.sweepLegacyKeys(ctx, client)
+	if time.Now().Before(f.legacySweepEnd) {
+		if err := client.Set(ctx, quotaLegacySweepWindowKey, "", legacySweepWindowTTL).Err(); err != nil {
+			log.Errorf("failed to set the legacy quota sweep window, error: %v", err)
+		}
+	}
 
 	token := uuid.NewString()
 	acquired, err := client.SetNX(ctx, quotaFlushLockKey, token, f.lockTTL).Result()
@@ -180,6 +186,7 @@ func (f *quotaFlusher) flush(ctx context.Context) {
 	}()
 
 	start := time.Now()
+	f.sweepLegacyKeys(ctx, client)
 	flushed, failed := f.drain(ctx, client, token, lost)
 	metric.QuotaFlushDurSummary.Observe(time.Since(start).Seconds())
 	metric.QuotaFlushKeysTotal.WithLabelValues("flushed").Add(float64(flushed))
@@ -333,12 +340,22 @@ func (f *quotaFlusher) keepLock(ctx context.Context, client *redis.Client, token
 	return lost
 }
 
-// sweepLegacyKeys marks all the quota keys in redis as dirty every legacySweepInterval until
-// legacySweepEnd. The previous versions did not track dirty keys, so the quotas they updated
-// during a rolling upgrade would otherwise never be flushed. A failed sweep is retried on the next call.
+// sweepLegacyKeys marks all the quota keys in redis as dirty, at most once every legacySweepInterval
+// across the instances, while any instance is within its sweep window. The previous versions did not
+// track dirty keys, so the quotas they updated during a rolling upgrade would otherwise never be flushed.
+// It is called by the lock holder only, a failed sweep is retried in the next round.
 func (f *quotaFlusher) sweepLegacyKeys(ctx context.Context, client *redis.Client) {
-	now := time.Now()
-	if now.Before(f.nextLegacySweep) || f.nextLegacySweep.After(f.legacySweepEnd) {
+	var inWindow, swept *redis.IntCmd
+	_, err := client.Pipelined(ctx, func(p redis.Pipeliner) error {
+		inWindow = p.Exists(ctx, quotaLegacySweepWindowKey)
+		swept = p.Exists(ctx, quotaLegacySweptKey)
+		return nil
+	})
+	if err != nil {
+		log.Errorf("failed to check the legacy quota sweep, error: %v", err)
+		return
+	}
+	if inWindow.Val() == 0 || swept.Val() == 1 {
 		return
 	}
 
@@ -356,7 +373,6 @@ func (f *quotaFlusher) sweepLegacyKeys(ctx context.Context, client *redis.Client
 		return nil
 	}
 
-	var err error
 	iter := client.Scan(ctx, 0, quotaKeyPrefix+"*", 1000).Iterator()
 	for err == nil && iter.Next(ctx) {
 		if keys = append(keys, iter.Val()); len(keys) >= 1000 {
@@ -374,7 +390,9 @@ func (f *quotaFlusher) sweepLegacyKeys(ctx context.Context, client *redis.Client
 		return
 	}
 
-	f.nextLegacySweep = now.Add(legacySweepInterval)
+	if err := client.Set(ctx, quotaLegacySweptKey, "", legacySweepInterval).Err(); err != nil {
+		log.Errorf("failed to mark the legacy quota sweep done, error: %v", err)
+	}
 	if total > 0 {
 		log.Infof("marked %d legacy quota keys as dirty", total)
 	}

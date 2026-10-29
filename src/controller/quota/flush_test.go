@@ -60,13 +60,15 @@ func (s *FlushTestSuite) SetupSuite() {
 	s.ctx = context.Background()
 }
 
+var flushTestKeys = []string{quotaDirtySetKey, quotaFlushingSetKey, quotaFlushLockKey, quotaLegacySweepWindowKey, quotaLegacySweptKey}
+
 func (s *FlushTestSuite) SetupTest() {
-	s.Require().NoError(s.client.Del(s.ctx, quotaDirtySetKey, quotaFlushingSetKey, quotaFlushLockKey).Err())
+	s.Require().NoError(s.client.Del(s.ctx, flushTestKeys...).Err())
 	s.updated = map[string]int64{}
 }
 
 func (s *FlushTestSuite) TearDownTest() {
-	s.Require().NoError(s.client.Del(s.ctx, quotaDirtySetKey, quotaFlushingSetKey, quotaFlushLockKey).Err())
+	s.Require().NoError(s.client.Del(s.ctx, flushTestKeys...).Err())
 }
 
 func (s *FlushTestSuite) newFlusher(update func(ctx context.Context, q *quota.Quota) error) *quotaFlusher {
@@ -74,13 +76,13 @@ func (s *FlushTestSuite) newFlusher(update func(ctx context.Context, q *quota.Qu
 		update = s.record
 	}
 	return &quotaFlusher{
-		getClient:       libredis.GetHarborClient,
-		update:          update,
-		lockTTL:         quotaFlushLockTTL,
-		batchSize:       quotaFlushBatchSize,
-		keyTimeout:      quotaFlushKeyTimeout,
-		nextLegacySweep: time.Now().Add(time.Hour),
-		legacySweepEnd:  time.Now().Add(2 * time.Hour),
+		getClient:  libredis.GetHarborClient,
+		update:     update,
+		lockTTL:    quotaFlushLockTTL,
+		batchSize:  quotaFlushBatchSize,
+		keyTimeout: quotaFlushKeyTimeout,
+		// out of the legacy sweep window
+		legacySweepEnd: time.Now(),
 	}
 }
 
@@ -375,24 +377,29 @@ func (s *FlushTestSuite) TestCrashedFlushIsRecovered() {
 	s.Empty(s.flushingKeys())
 }
 
-// failAfterHook runs the matching commands but reports an error to the client
-type failAfterHook struct {
+// afterHook runs the matching commands, then calls after and reports its error to the client
+type afterHook struct {
 	match func(cmd redis.Cmder) bool
+	after func() error
 }
 
-func (h *failAfterHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h *afterHook) DialHook(next redis.DialHook) redis.DialHook { return next }
 
-func (h *failAfterHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+func (h *afterHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
 	return next
 }
 
-func (h *failAfterHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+func (h *afterHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		if err := next(ctx, cmd); err != nil || !h.match(cmd) {
 			return err
 		}
-		return errors.New("connection reset")
+		return h.after()
 	}
+}
+
+func isClaim(cmd redis.Cmder) bool {
+	return cmd.Name() == "evalsha" && cmd.Args()[1] == claimScript.Hash()
 }
 
 func (s *FlushTestSuite) TestAmbiguousClaimIsRecovered() {
@@ -402,9 +409,7 @@ func (s *FlushTestSuite) TestAmbiguousClaimIsRecovered() {
 	s.Require().NoError(claimScript.Load(s.ctx, s.client).Err())
 	client := redis.NewClient(&redis.Options{Addr: s.client.Options().Addr, DB: s.client.Options().DB})
 	defer client.Close()
-	client.AddHook(&failAfterHook{match: func(cmd redis.Cmder) bool {
-		return cmd.Name() == "evalsha" && cmd.Args()[1] == claimScript.Hash()
-	}})
+	client.AddHook(&afterHook{match: isClaim, after: func() error { return errors.New("connection reset") }})
 
 	// the keys are claimed but the client sees an error
 	f := s.newFlusher(nil)
@@ -520,30 +525,36 @@ func (s *FlushTestSuite) TestSweepLegacyKeys() {
 	f := s.newFlusher(nil)
 	f.flush(s.ctx)
 	_, ok := s.flushed(id)
-	s.False(ok, "legacy keys are not swept before the sweep time")
+	s.False(ok, "legacy keys are not swept out of the sweep window")
 
-	f.nextLegacySweep = time.Now().Add(-time.Second)
+	// not swept by an instance not holding the lock
+	f.legacySweepEnd = time.Now().Add(time.Hour)
+	s.Require().NoError(s.client.Set(s.ctx, quotaFlushLockKey, "other", time.Minute).Err())
+	f.flush(s.ctx)
+	s.Empty(s.dirtyKeys())
+	s.Require().NoError(s.client.Del(s.ctx, quotaFlushLockKey).Err())
+
 	f.flush(s.ctx)
 	used, ok := s.flushed(id)
 	s.True(ok)
 	s.Equal(int64(7), used)
-	s.True(f.nextLegacySweep.After(time.Now()))
 
 	// written by a previous version after the sweep
 	s.setQuota(id, 8, false)
 	f.flush(s.ctx)
 	used, _ = s.flushed(id)
-	s.Equal(int64(7), used, "legacy keys are not swept before the next sweep time")
+	s.Equal(int64(7), used, "legacy keys are not swept again within the sweep interval")
 
-	f.nextLegacySweep = time.Now().Add(-time.Second)
-	f.flush(s.ctx)
+	// swept by the lock holder out of its own window while another instance is within its window
+	s.Require().NoError(s.client.Del(s.ctx, quotaLegacySweptKey).Err())
+	s.newFlusher(nil).flush(s.ctx)
 	used, _ = s.flushed(id)
 	s.Equal(int64(8), used)
 
-	// no sweep after the end
+	// no sweep once all the instances are out of their window
 	s.setQuota(id, 9, false)
-	f.nextLegacySweep = time.Now().Add(-time.Second)
-	f.legacySweepEnd = time.Now().Add(-2 * time.Second)
+	f.legacySweepEnd = time.Now().Add(-time.Second)
+	s.Require().NoError(s.client.Del(s.ctx, quotaLegacySweepWindowKey, quotaLegacySweptKey).Err())
 	f.flush(s.ctx)
 	used, _ = s.flushed(id)
 	s.Equal(int64(8), used)
@@ -553,13 +564,20 @@ func (s *FlushTestSuite) TestFailedLegacySweepIsRetried() {
 	id := uuid.NewString()
 	s.setQuota(id, 7, false)
 
+	client := redis.NewClient(&redis.Options{Addr: s.client.Options().Addr, DB: s.client.Options().DB})
+	defer client.Close()
+	client.AddHook(&afterHook{
+		match: func(cmd redis.Cmder) bool { return cmd.Name() == "scan" },
+		after: func() error { return errors.New("connection reset") },
+	})
 	f := s.newFlusher(nil)
-	f.nextLegacySweep = time.Now().Add(-time.Second)
-	ctx, cancel := context.WithCancel(s.ctx)
-	cancel()
-	f.sweepLegacyKeys(ctx, s.client)
-	s.Empty(s.dirtyKeys())
+	f.getClient = func() (*redis.Client, error) { return client, nil }
+	f.legacySweepEnd = time.Now().Add(time.Hour)
+	f.flush(s.ctx)
+	_, ok := s.flushed(id)
+	s.False(ok)
 
+	f.getClient = libredis.GetHarborClient
 	f.flush(s.ctx)
 	used, ok := s.flushed(id)
 	s.True(ok, "the failed sweep should be retried")
