@@ -346,9 +346,16 @@ So far, only the following two backends are supported:
 
 * **STD_OUTPUT**: Output the log to the std stream (stdout/stderr)
 * **DB**: Output the log to the database with the table name `job_log`
+  * sweeper supports
+  * getter supports
 * **FILE**: Output the log to the log files
   * sweeper supports
   * getter supports
+
+The job log API (`GET /api/v1/jobs/{job_id}/log`), which backs the task log APIs of Harbor (replication, GC,
+retention, scan, etc.), relies on a getter. If only `STD_OUTPUT` is configured in `job_loggers`, the API returns
+`404` with a hint and the job logs are only available in the job service output. Configure `DB` or `FILE` together
+with `STD_OUTPUT` to keep both.
 
 ### Configure loggers
 

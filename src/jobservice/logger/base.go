@@ -238,6 +238,9 @@ func Init(ctx context.Context) error {
 	if g != nil {
 		// Avoid data race issue
 		singletons.Store(systemKeyLogDataGetter, g)
+	} else {
+		singletons.Delete(systemKeyLogDataGetter)
+		Warningf("Job logs can not be retrieved: %s", noLogDataGetterHint)
 	}
 
 	// If sweepers configured

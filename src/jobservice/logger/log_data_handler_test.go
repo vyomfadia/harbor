@@ -17,11 +17,14 @@ package logger
 import (
 	"context"
 	"os"
+	"path"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/goharbor/harbor/src/jobservice/config"
+	"github.com/goharbor/harbor/src/jobservice/errs"
 )
 
 func TestRetrieve(t *testing.T) {
@@ -49,4 +52,35 @@ func TestRetrieve(t *testing.T) {
 	require.NoError(t, err)
 	_, err = Retrieve("no_id")
 	require.Error(t, err)
+
+	// Missing log: not found without the "no getter" hint
+	_, err = Retrieve(fakeJobID)
+	require.True(t, errs.IsObjectNotFoundError(err))
+	assert.NotContains(t, err.Error(), noLogDataGetterHint)
+
+	// Existing log is returned
+	logFile := path.Join(os.TempDir(), "f00000000000000000000003.log")
+	require.NoError(t, os.WriteFile(logFile, []byte("job log data"), 0600))
+	defer os.Remove(logFile)
+	data, err := Retrieve("f00000000000000000000003")
+	require.NoError(t, err)
+	assert.Equal(t, "job log data", string(data))
+}
+
+func TestRetrieveStdOutputOnly(t *testing.T) {
+	config.DefaultConfig.JobLoggerConfigs = []*config.LoggerConfig{
+		{
+			Name:  "STD_OUTPUT",
+			Level: "DEBUG",
+		},
+	}
+
+	err := Init(context.TODO())
+	require.NoError(t, err)
+
+	_, err = Retrieve(fakeJobID)
+	require.Error(t, err)
+	assert.True(t, errs.IsObjectNotFoundError(err))
+	assert.Contains(t, err.Error(), fakeJobID)
+	assert.Contains(t, err.Error(), noLogDataGetterHint)
 }
