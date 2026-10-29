@@ -139,7 +139,7 @@ func insertOrGetID(o beegoorm.QueryExecutor, insert, query string, args ...any) 
 			return id, err
 		}
 	}
-	return 0, err
+	return 0, errors.ConflictError(nil).WithMessage("the row is being deleted and recreated concurrently, retry later")
 }
 
 func (d *dao) GetArtifactAndBlob(ctx context.Context, artifactDigest, blobDigest string) (*models.ArtifactAndBlob, error) {
