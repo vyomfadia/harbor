@@ -17,6 +17,7 @@ package blob
 import (
 	"io"
 	"net/http"
+	"slices"
 
 	"github.com/goharbor/harbor/src/common"
 	"github.com/goharbor/harbor/src/lib"
@@ -90,21 +91,17 @@ func PutManifestMiddleware() func(http.Handler) http.Handler {
 			blobDigests = append(blobDigests, reference.Digest.String())
 		}
 
-		// NOTE: associate all blobs with project because the already exist associations may cleanup by others
-		if err := blobController.AssociateWithProjectByDigests(ctx, blobDigests, p.ProjectID); err != nil {
-			logger.Errorf("associate blobs of manifest %s with project %d failed, error: %v", descriptor.Digest.String(), p.ProjectID, err)
-			return err
-		}
-
 		// ensure Blob for the manifest
-		blobID, err := blobController.Ensure(ctx, descriptor.Digest.String(), contentType, descriptor.Size)
-		if err != nil {
+		if _, err := blobController.Ensure(ctx, descriptor.Digest.String(), contentType, descriptor.Size); err != nil {
 			logger.Errorf("ensure blob %s failed, error: %v", descriptor.Digest.String(), err)
 			return err
 		}
 
-		if err := blobController.AssociateWithProjectByID(ctx, blobID, p.ProjectID); err != nil {
-			logger.Errorf("associate manifest with artifact %s failed, error: %v", descriptor.Digest.String(), err)
+		// NOTE: associate all blobs with project because the already exist associations may cleanup by others,
+		// the manifest is included so that all associations are created in the same order as other requests
+		projectBlobDigests := append(slices.Clone(blobDigests), descriptor.Digest.String())
+		if err := blobController.AssociateWithProjectByDigests(ctx, projectBlobDigests, p.ProjectID); err != nil {
+			logger.Errorf("associate blobs of manifest %s with project %d failed, error: %v", descriptor.Digest.String(), p.ProjectID, err)
 			return err
 		}
 
