@@ -70,6 +70,10 @@ func (m *Manager) Create(ctx context.Context, repo *model.RepoRecord) (int64, er
 	return m.delegator.Create(ctx, repo)
 }
 
+func (m *Manager) Ensure(ctx context.Context, repo *model.RepoRecord) (bool, int64, error) {
+	return m.delegator.Ensure(ctx, repo)
+}
+
 func (m *Manager) NonEmptyRepos(ctx context.Context) ([]*model.RepoRecord, error) {
 	return m.delegator.NonEmptyRepos(ctx)
 }

@@ -73,6 +73,10 @@ func (m *Manager) Create(ctx context.Context, artifact *artifact.Artifact) (int6
 	return m.delegator.Create(ctx, artifact)
 }
 
+func (m *Manager) Ensure(ctx context.Context, artifact *artifact.Artifact) (bool, int64, error) {
+	return m.delegator.Ensure(ctx, artifact)
+}
+
 func (m *Manager) ListReferences(ctx context.Context, query *q.Query) ([]*artifact.Reference, error) {
 	return m.delegator.ListReferences(ctx, query)
 }

@@ -16,6 +16,7 @@ package dao
 
 import (
 	"context"
+	"time"
 
 	"github.com/goharbor/harbor/src/lib/errors"
 	"github.com/goharbor/harbor/src/lib/orm"
@@ -32,6 +33,9 @@ type DAO interface {
 	Get(ctx context.Context, id int64) (accessory *Accessory, err error)
 	// Create the accessory
 	Create(ctx context.Context, accessory *Accessory) (id int64, err error)
+	// Ensure creates the accessory if no accessory of the same artifact and subject digest exists,
+	// and returns the ID of the created or existing one
+	Ensure(ctx context.Context, accessory *Accessory) (created bool, id int64, err error)
 	// Update the accessory
 	Update(ctx context.Context, accessory *Accessory) error
 	// Delete the accessory specified by ID
@@ -103,6 +107,26 @@ func (d *dao) Create(ctx context.Context, acc *Accessory) (int64, error) {
 		}
 	}
 	return id, err
+}
+
+func (d *dao) Ensure(ctx context.Context, acc *Accessory) (bool, int64, error) {
+	// fill the auto_now_add column as Insert does
+	if acc.CreationTime.IsZero() {
+		acc.CreationTime = time.Now()
+	}
+	id, created, err := orm.InsertOrGetID(ctx,
+		`INSERT INTO artifact_accessory (artifact_id, subject_artifact_id, subject_artifact_repo, subject_artifact_digest,
+	type, source, size, digest, creation_time)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?::timestamptz)
+ON CONFLICT (artifact_id, subject_artifact_digest) DO NOTHING RETURNING id`,
+		[]any{acc.ArtifactID, acc.SubjectArtifactID, acc.SubjectArtifactRepo, acc.SubjectArtifactDigest,
+			acc.Type, acc.Source, acc.Size, acc.Digest, orm.TimeArg(acc.CreationTime)},
+		`SELECT id FROM artifact_accessory WHERE artifact_id = ? AND subject_artifact_digest = ?`,
+		acc.ArtifactID, acc.SubjectArtifactDigest)
+	if err != nil {
+		return false, 0, err
+	}
+	return created, id, nil
 }
 
 func (d *dao) Update(ctx context.Context, acc *Accessory) error {

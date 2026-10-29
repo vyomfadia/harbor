@@ -22,7 +22,6 @@ import (
 	"github.com/goharbor/harbor/src/common/utils"
 	"github.com/goharbor/harbor/src/lib/errors"
 	"github.com/goharbor/harbor/src/lib/log"
-	"github.com/goharbor/harbor/src/lib/orm"
 	"github.com/goharbor/harbor/src/lib/q"
 	"github.com/goharbor/harbor/src/lib/selector"
 	"github.com/goharbor/harbor/src/pkg"
@@ -115,24 +114,22 @@ func (c *controller) Ensure(ctx context.Context, repositoryID, artifactID int64,
 	}
 
 	// the tag doesn't exist under the repository, create it
-	// use orm.WithTransaction here to avoid the issue:
-	// https://www.postgresql.org/message-id/002e01c04da9%24a8f95c20%2425efe6c1%40lasting.ro
-	tagID := int64(0)
-	if err = orm.WithTransaction(func(ctx context.Context) error {
-		tag := &Tag{}
-		tag.RepositoryID = repositoryID
-		tag.ArtifactID = artifactID
-		tag.Name = name
-		tag.PushTime = time.Now()
-		tagID, err = c.Create(ctx, tag)
-		return err
-	})(orm.SetTransactionOpNameToContext(ctx, "tx-tag-ensure")); err != nil {
-		if errors.IsConflictErr(err) {
-			return tagID, nil
-		}
+	if !isValidTag(name) {
+		return 0, errors.BadRequestError(errors.Errorf("invalid tag name: %s", name))
+	}
+	created, tagID, err := c.tagMgr.Ensure(ctx, &model_tag.Tag{
+		RepositoryID: repositoryID,
+		ArtifactID:   artifactID,
+		Name:         name,
+		PushTime:     time.Now(),
+	})
+	if err != nil {
 		return 0, err
 	}
-
+	// a tag created concurrently by others is kept as is
+	if created {
+		c.touchRepo(ctx, repositoryID)
+	}
 	return tagID, nil
 }
 

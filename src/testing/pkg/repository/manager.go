@@ -108,6 +108,41 @@ func (_m *Manager) Delete(ctx context.Context, id int64) error {
 	return r0
 }
 
+// Ensure provides a mock function with given fields: ctx, _a1
+func (_m *Manager) Ensure(ctx context.Context, _a1 *model.RepoRecord) (bool, int64, error) {
+	ret := _m.Called(ctx, _a1)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Ensure")
+	}
+
+	var r0 bool
+	var r1 int64
+	var r2 error
+	if rf, ok := ret.Get(0).(func(context.Context, *model.RepoRecord) (bool, int64, error)); ok {
+		return rf(ctx, _a1)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *model.RepoRecord) bool); ok {
+		r0 = rf(ctx, _a1)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *model.RepoRecord) int64); ok {
+		r1 = rf(ctx, _a1)
+	} else {
+		r1 = ret.Get(1).(int64)
+	}
+
+	if rf, ok := ret.Get(2).(func(context.Context, *model.RepoRecord) error); ok {
+		r2 = rf(ctx, _a1)
+	} else {
+		r2 = ret.Error(2)
+	}
+
+	return r0, r1, r2
+}
+
 // Get provides a mock function with given fields: ctx, id
 func (_m *Manager) Get(ctx context.Context, id int64) (*model.RepoRecord, error) {
 	ret := _m.Called(ctx, id)

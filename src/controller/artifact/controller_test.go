@@ -429,7 +429,7 @@ func (c *controllerTestSuite) TestEnsureArtifact() {
 	}, nil)
 	c.repoMgr.On("Touch", mock.Anything, int64(1)).Return(nil)
 	c.artMgr.On("GetByDigest", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NotFoundError(nil))
-	c.artMgr.On("Create", mock.Anything, mock.Anything).Return(int64(1), nil)
+	c.artMgr.On("Ensure", mock.Anything, mock.Anything).Return(true, int64(1), nil)
 	c.abstractor.On("AbstractMetadata").Return(nil)
 	created, art, err = c.ctl.ensureArtifact(orm.NewContext(nil, &ormtesting.FakeOrmer{}), "library/hello-world", digest)
 	c.Require().Nil(err)
@@ -439,12 +439,12 @@ func (c *controllerTestSuite) TestEnsureArtifact() {
 	// reset the mock
 	c.SetupTest()
 
-	// the artifact doesn't exist and get a conflict error on creating the artifact and fail to get again
+	// the artifact is created by others concurrently and fail to get it
 	c.repoMgr.On("GetByName", mock.Anything, mock.Anything).Return(&repomodel.RepoRecord{
 		ProjectID: 1,
 	}, nil)
 	c.artMgr.On("GetByDigest", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NotFoundError(nil))
-	c.artMgr.On("Create", mock.Anything, mock.Anything).Return(int64(1), errors.ConflictError(nil))
+	c.artMgr.On("Ensure", mock.Anything, mock.Anything).Return(false, int64(1), nil)
 	c.abstractor.On("AbstractMetadata").Return(nil)
 	created, art, err = c.ctl.ensureArtifact(orm.NewContext(nil, &ormtesting.FakeOrmer{}), "library/hello-world", digest)
 	c.Require().Error(err, errors.NotFoundError(nil))
@@ -462,7 +462,7 @@ func (c *controllerTestSuite) TestEnsure() {
 	}, nil)
 	c.repoMgr.On("Touch", mock.Anything, int64(1)).Return(nil)
 	c.artMgr.On("GetByDigest", mock.Anything, mock.Anything, mock.Anything).Return(nil, errors.NotFoundError(nil))
-	c.artMgr.On("Create", mock.Anything, mock.Anything).Return(int64(1), nil)
+	c.artMgr.On("Ensure", mock.Anything, mock.Anything).Return(true, int64(1), nil)
 	c.abstractor.On("AbstractMetadata").Return(nil)
 	c.tagCtl.On("Ensure").Return(int64(1), nil)
 	c.accMgr.On("Ensure").Return(nil)
@@ -823,10 +823,10 @@ func (c *controllerTestSuite) TestCopy() {
 		Name:         "library/hello-world",
 	}, nil)
 	c.abstractor.On("AbstractMetadata").Return(nil)
-	c.artMgr.On("Create", mock.Anything, mock.Anything).Return(int64(1), nil)
+	c.artMgr.On("Ensure", mock.Anything, mock.Anything).Return(true, int64(1), nil)
 	c.regCli.On("Copy", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	c.tagCtl.On("Ensure").Return(int64(1), nil)
-	c.accMgr.On("Ensure", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	c.accMgr.On("Ensure", mock.Anything, mock.Anything).Return(nil)
 	_, err := c.ctl.Copy(orm.NewContext(nil, &ormtesting.FakeOrmer{}), "library/hello-world", "latest", "library/hello-world2")
 	c.Require().Nil(err)
 }

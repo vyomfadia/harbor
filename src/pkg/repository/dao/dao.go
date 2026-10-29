@@ -36,6 +36,9 @@ type DAO interface {
 	Get(ctx context.Context, id int64) (repository *model.RepoRecord, err error)
 	// Create the repository
 	Create(ctx context.Context, repository *model.RepoRecord) (id int64, err error)
+	// Ensure creates the repository if no repository with the same name exists,
+	// and returns the ID of the created or existing one
+	Ensure(ctx context.Context, repository *model.RepoRecord) (created bool, id int64, err error)
 	// Delete the repository specified by ID
 	Delete(ctx context.Context, id int64) (err error)
 	// Update updates the repository. Only the properties specified by "props" will be updated if it is set
@@ -101,6 +104,29 @@ func (d *dao) Create(ctx context.Context, repository *model.RepoRecord) (int64, 
 		err = e
 	}
 	return id, err
+}
+
+func (d *dao) Ensure(ctx context.Context, repository *model.RepoRecord) (bool, int64, error) {
+	// fill the auto_now(_add) columns as Insert does
+	now := time.Now()
+	if repository.CreationTime.IsZero() {
+		repository.CreationTime = now
+	}
+	if repository.UpdateTime.IsZero() {
+		repository.UpdateTime = now
+	}
+	id, created, err := orm.InsertOrGetID(ctx,
+		`INSERT INTO repository (name, project_id, description, pull_count, star_count, creation_time, update_time)
+VALUES (?, ?, ?, ?, ?, ?::timestamptz, ?::timestamptz)
+ON CONFLICT (name) DO NOTHING RETURNING repository_id`,
+		[]any{repository.Name, repository.ProjectID, repository.Description, repository.PullCount, repository.StarCount,
+			orm.TimeArg(repository.CreationTime), orm.TimeArg(repository.UpdateTime)},
+		`SELECT repository_id FROM repository WHERE name = ?`,
+		repository.Name)
+	if err != nil {
+		return false, 0, err
+	}
+	return created, id, nil
 }
 
 func (d *dao) Delete(ctx context.Context, id int64) error {
