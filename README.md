@@ -33,8 +33,6 @@ registry:
     image: {repository: ghcr.io/vyomfadia/harbor-registryctl, tag: <tag>}
 ```
 
-GHCR packages are private by default: make them public, or add a pull secret via `imagePullSecrets`.
-
 ---
 
 # Harbor
