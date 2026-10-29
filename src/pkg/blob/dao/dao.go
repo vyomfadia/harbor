@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	beegoorm "github.com/beego/beego/v2/client/orm"
 	"github.com/docker/distribution/manifest/schema2"
 
 	"github.com/goharbor/harbor/src/lib/errors"
@@ -104,24 +105,36 @@ func (d *dao) CreateArtifactAndBlob(ctx context.Context, artifactDigest, blobDig
 	}
 
 	// see CreateProjectBlob for why DO NOTHING is used
-	var id int64
-	sql := `INSERT INTO artifact_blob (digest_af, digest_blob, creation_time) VALUES (?, ?, ?)
-ON CONFLICT (digest_af, digest_blob) DO NOTHING RETURNING id`
-	err = o.Raw(sql, artifactDigest, blobDigest, time.Now()).QueryRow(&id)
-	if err == nil {
-		return id, nil
-	}
-	if !errors.Is(err, orm.ErrNoRows) {
-		return 0, err
-	}
-
-	// no row is returned when the association already exists
-	sql = `SELECT id FROM artifact_blob WHERE digest_af = ? AND digest_blob = ?`
-	if err := o.Raw(sql, artifactDigest, blobDigest).QueryRow(&id); err != nil {
+	id, err := insertOrGetID(o,
+		`INSERT INTO artifact_blob (digest_af, digest_blob, creation_time) VALUES (?, ?, ?)
+ON CONFLICT (digest_af, digest_blob) DO NOTHING RETURNING id`,
+		`SELECT id FROM artifact_blob WHERE digest_af = ? AND digest_blob = ?`,
+		artifactDigest, blobDigest)
+	if err != nil {
 		return 0, orm.WrapNotFoundError(err, "not found by artifact digest %s and blob digest %s", artifactDigest, blobDigest)
 	}
 
 	return id, nil
+}
+
+// insertOrGetID runs insert, which returns no row on conflict, then query for the existing id.
+// Both are retried as the existing row can be deleted by others in between.
+func insertOrGetID(o beegoorm.QueryExecutor, insert, query string, args ...any) (int64, error) {
+	var (
+		id  int64
+		err error
+	)
+	for range 3 {
+		err = o.Raw(insert, append(args, time.Now())...).QueryRow(&id)
+		if !errors.Is(err, orm.ErrNoRows) {
+			return id, err
+		}
+		err = o.Raw(query, args...).QueryRow(&id)
+		if !errors.Is(err, orm.ErrNoRows) {
+			return id, err
+		}
+	}
+	return 0, err
 }
 
 func (d *dao) GetArtifactAndBlob(ctx context.Context, artifactDigest, blobDigest string) (*models.ArtifactAndBlob, error) {
@@ -360,20 +373,12 @@ func (d *dao) CreateProjectBlob(ctx context.Context, projectID, blobID int64) (i
 
 	// DO NOTHING instead of DO UPDATE, the latter row-locks the existing association until
 	// the transaction ends, which deadlocks concurrent pushes sharing blobs
-	var id int64
-	sql := `INSERT INTO project_blob (project_id, blob_id, creation_time) VALUES (?, ?, ?)
-ON CONFLICT (project_id, blob_id) DO NOTHING RETURNING id`
-	err = o.Raw(sql, projectID, blobID, time.Now()).QueryRow(&id)
-	if err == nil {
-		return id, nil
-	}
-	if !errors.Is(err, orm.ErrNoRows) {
-		return 0, err
-	}
-
-	// no row is returned when the association already exists
-	sql = `SELECT id FROM project_blob WHERE project_id = ? AND blob_id = ?`
-	if err := o.Raw(sql, projectID, blobID).QueryRow(&id); err != nil {
+	id, err := insertOrGetID(o,
+		`INSERT INTO project_blob (project_id, blob_id, creation_time) VALUES (?, ?, ?)
+ON CONFLICT (project_id, blob_id) DO NOTHING RETURNING id`,
+		`SELECT id FROM project_blob WHERE project_id = ? AND blob_id = ?`,
+		projectID, blobID)
+	if err != nil {
 		return 0, orm.WrapNotFoundError(err, "project blob not found by project id %d and blob id %d", projectID, blobID)
 	}
 
