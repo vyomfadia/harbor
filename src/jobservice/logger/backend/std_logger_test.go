@@ -2,6 +2,9 @@ package backend
 
 import (
 	"bytes"
+	"fmt"
+	"io"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -40,4 +43,56 @@ func TestStdLoggerWithKey(t *testing.T) {
 	assert.True(t, strings.HasSuffix(lines[1], "[job%id] formatted 2"), lines[1])
 	assert.True(t, strings.HasSuffix(lines[2], "untagged"), lines[2])
 	assert.NotContains(t, lines[2], "job%id")
+}
+
+// Test every line of a multiline message is tagged, including newlines from arguments
+func TestStdLoggerWithKeyMultiline(t *testing.T) {
+	buf := &bytes.Buffer{}
+	l := (&StdOutputLogger{backendLogger: log.New(buf, log.NewTextFormatter(), log.DebugLevel)}).WithKey("job")
+
+	l.Infof("\n%s", "| a |\n| b |\n")
+	l.Error("x\ny")
+
+	lines := strings.Split(strings.TrimSuffix(buf.String(), "\n"), "\n")
+	require.Len(t, lines, 5, buf.String())
+	assert.True(t, strings.HasSuffix(lines[0], " [job] "), lines[0])
+	assert.Equal(t, "[job] | a |", lines[1])
+	assert.Equal(t, "[job] | b |", lines[2])
+	assert.True(t, strings.HasSuffix(lines[3], " [job] x"), lines[3])
+	assert.Equal(t, "[job] y", lines[4])
+}
+
+// Test the tagged logger reports the caller's file and line
+func TestStdLoggerWithKeyCaller(t *testing.T) {
+	buf := &bytes.Buffer{}
+	l := (&StdOutputLogger{backendLogger: log.New(buf, log.NewTextFormatter(), log.DebugLevel, 4)}).WithKey("job")
+
+	_, _, line, _ := runtime.Caller(0)
+	l.Infof("a\nb")
+	l.Warning("c")
+
+	out := buf.String()
+	assert.Contains(t, out, fmt.Sprintf("std_logger_test.go:%d]", line+1), out)
+	assert.Contains(t, out, fmt.Sprintf("std_logger_test.go:%d]", line+2), out)
+}
+
+// Test suppressed tagged messages are neither written nor formatted
+func TestStdLoggerWithKeySuppressed(t *testing.T) {
+	buf := &bytes.Buffer{}
+	l := (&StdOutputLogger{backendLogger: log.New(buf, log.NewTextFormatter(), log.ErrorLevel)}).WithKey("job")
+
+	allocs := testing.AllocsPerRun(100, func() {
+		l.Debugf("%s", "suppressed")
+		l.Info("suppressed")
+	})
+	assert.Zero(t, allocs)
+	assert.Zero(t, buf.Len())
+}
+
+func BenchmarkStdLoggerWithKeySuppressed(b *testing.B) {
+	l := (&StdOutputLogger{backendLogger: log.New(io.Discard, log.NewTextFormatter(), log.ErrorLevel)}).WithKey("job")
+	b.ReportAllocs()
+	for b.Loop() {
+		l.Debugf("%s", "suppressed")
+	}
 }
