@@ -2,7 +2,7 @@
 set -e
 
 echo "get the conformance testing code..."
-git clone https://github.com/opencontainers/distribution-spec.git
+git clone --depth 1 --branch "${DISTRIBUTION_SPEC_REF:-v1.1.1}" https://github.com/opencontainers/distribution-spec.git
 
 function createPro {
    echo "create testing project: $2"
@@ -31,4 +31,4 @@ export OCI_CROSSMOUNT_NAMESPACE="crossmount/testrepo"
 export OCI_AUTOMATIC_CROSSMOUNT="false"
 
 cd ./distribution-spec/conformance
-go test .
+go test . ${OCI_CONFORMANCE_SKIP:+"-ginkgo.skip=$OCI_CONFORMANCE_SKIP"}
