@@ -1,3 +1,42 @@
+## Fork notes
+
+This is a personal fork of [goharbor/harbor](https://github.com/goharbor/harbor) that carries a few
+backend (Go) patches on top of upstream. Only the images built from patched Go code are published:
+
+| Image | Built from |
+|-------|------------|
+| `ghcr.io/vyomfadia/harbor-core` | `make/photon/core/Dockerfile` |
+| `ghcr.io/vyomfadia/harbor-jobservice` | `make/photon/jobservice/Dockerfile` |
+| `ghcr.io/vyomfadia/harbor-exporter` | `make/photon/exporter/Dockerfile` |
+
+Tags: the 8-char commit SHA, the branch name (`main`, `release-*`) and git tags (`v*`).
+Images are built by [`.github/workflows/images.yml`](.github/workflows/images.yml) on pushes to
+`main`/`release-*`, on `v*` tags, or manually (`workflow_dispatch` with any ref). They use the
+upstream Dockerfiles and `goharbor/harbor-*-base` images, so they are drop-in replacements.
+
+Point the upstream Helm chart at them and keep upstream images for everything else
+(portal, registry, database, redis, trivy, ...). Use a tag built from the same minor version
+as the rest of the deployment (e.g. a `release-2.15-*` branch for a 2.15 install):
+
+```yaml
+core:
+  image:
+    repository: ghcr.io/vyomfadia/harbor-core
+    tag: <tag>
+jobservice:
+  image:
+    repository: ghcr.io/vyomfadia/harbor-jobservice
+    tag: <tag>
+exporter:          # only if metrics are enabled
+  image:
+    repository: ghcr.io/vyomfadia/harbor-exporter
+    tag: <tag>
+```
+
+GHCR packages are private by default: make them public, or add a pull secret via `imagePullSecrets`.
+
+---
+
 # Harbor
 [![CI](https://github.com/goharbor/harbor/actions/workflows/CI.yml/badge.svg)](https://github.com/goharbor/harbor/actions/workflows/CI.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/goharbor/harbor)](https://goreportcard.com/report/github.com/goharbor/harbor)
