@@ -234,7 +234,8 @@ func (d *daoTestSuite) TestEnsureConcurrently() {
 		Type:                  "signature.cosign",
 	}
 	result := ormtesting.EnsureConcurrently(d.ctx, 16, func(ctx context.Context) (bool, int64, error) {
-		return d.dao.Ensure(ctx, acc)
+		acc := *acc // Ensure fills the zero CreationTime
+		return d.dao.Ensure(ctx, &acc)
 	})
 	d.Require().Empty(result.Errs)
 	d.Equal(1, result.Created)
