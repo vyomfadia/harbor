@@ -22,6 +22,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/goharbor/harbor/src/common/dao"
 	"github.com/goharbor/harbor/src/jobservice/job"
 	"github.com/goharbor/harbor/src/lib/cache"
@@ -562,6 +564,93 @@ func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeys() {
 	exec, err = e.executionDAO.Get(e.ctx, id)
 	e.Require().NoError(err)
 	e.Equal(job.SuccessStatus.String(), exec.Status)
+}
+
+func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeysRetriedOnFailure() {
+	e.T().Setenv("_REDIS_URL_HARBOR", "redis://localhost:6379/0")
+	client, err := libredis.GetHarborClient()
+	e.Require().NoError(err)
+
+	legacyKey := "cache:execution:id:999124:vendor:GC:status_outdate"
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	defer client.Del(e.ctx, legacyKey)
+
+	defer func(at time.Time) { legacyExecStatusOutdateMigrateAt = at }(legacyExecStatusOutdateMigrateAt)
+	legacyExecStatusOutdateMigrateAt = time.Now().Add(-time.Second)
+	legacyExecStatusOutdateMigrated.Store(false)
+
+	ctx, cancel := context.WithCancel(e.ctx)
+	cancel()
+	scanAndRefreshOutdateStatus(ctx)
+	e.False(legacyExecStatusOutdateMigrated.Load())
+	e.Equal(int64(1), client.Exists(e.ctx, legacyKey).Val())
+
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.True(legacyExecStatusOutdateMigrated.Load())
+	e.Zero(client.Exists(e.ctx, legacyKey).Val())
+}
+
+type fakeRefreshExecDAO struct {
+	ExecutionDAO
+	current, refreshed string
+}
+
+func (f *fakeRefreshExecDAO) RefreshStatus(context.Context, int64) (bool, string, error) {
+	f.refreshed = f.current
+	return true, f.current, nil
+}
+
+// beforeCmdHook calls before ahead of each command other than SCAN
+type beforeCmdHook struct {
+	before func()
+}
+
+func (h *beforeCmdHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *beforeCmdHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *beforeCmdHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() != "scan" {
+			h.before()
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeyIsAtomic() {
+	e.T().Setenv("_REDIS_URL_HARBOR", "redis://localhost:6379/0")
+	client, err := libredis.GetHarborClient()
+	e.Require().NoError(err)
+
+	legacyKey := "cache:execution:id:999123:vendor:GC:status_outdate"
+	e.Require().NoError(client.Del(e.ctx, execStatusOutdateSetKey).Err())
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	defer client.Del(e.ctx, legacyKey, execStatusOutdateSetKey)
+
+	defer func(d ExecutionDAO) { ExecDAO = d }(ExecDAO)
+	fake := &fakeRefreshExecDAO{current: "v0"}
+	ExecDAO = fake
+	defer func(at time.Time) { legacyExecStatusOutdateMigrateAt = at }(legacyExecStatusOutdateMigrateAt)
+	legacyExecStatusOutdateMigrateAt = time.Now().Add(time.Hour)
+
+	migrationClient := redis.NewClient(&redis.Options{Addr: client.Options().Addr, DB: client.Options().DB})
+	defer migrationClient.Close()
+	n := 0
+	migrationClient.AddHook(&beforeCmdHook{before: func() {
+		// a new instance consumes the set, then an instance of the previous version
+		// updates the status and writes the legacy key
+		scanAndRefreshOutdateStatus(e.ctx)
+		n++
+		fake.current = fmt.Sprintf("v%d", n)
+		e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	}})
+	e.Require().NoError(migrateLegacyOutdateKeys(e.ctx, migrationClient))
+
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal(fake.current, fake.refreshed, "the latest status should be refreshed")
 }
 
 func TestExecutionDAOSuite(t *testing.T) {
