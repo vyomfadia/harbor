@@ -17,6 +17,7 @@ package quota
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -59,13 +60,15 @@ func (s *FlushTestSuite) SetupSuite() {
 	s.ctx = context.Background()
 }
 
+var flushTestKeys = []string{quotaDirtySetKey, quotaFlushingSetKey, quotaFlushLockKey, quotaLegacySweepWindowKey, quotaLegacySweptKey}
+
 func (s *FlushTestSuite) SetupTest() {
-	s.Require().NoError(s.client.Del(s.ctx, quotaDirtySetKey, quotaFlushLockKey).Err())
+	s.Require().NoError(s.client.Del(s.ctx, flushTestKeys...).Err())
 	s.updated = map[string]int64{}
 }
 
 func (s *FlushTestSuite) TearDownTest() {
-	s.Require().NoError(s.client.Del(s.ctx, quotaDirtySetKey, quotaFlushLockKey).Err())
+	s.Require().NoError(s.client.Del(s.ctx, flushTestKeys...).Err())
 }
 
 func (s *FlushTestSuite) newFlusher(update func(ctx context.Context, q *quota.Quota) error) *quotaFlusher {
@@ -73,10 +76,14 @@ func (s *FlushTestSuite) newFlusher(update func(ctx context.Context, q *quota.Qu
 		update = s.record
 	}
 	return &quotaFlusher{
-		getClient:     libredis.GetHarborClient,
-		update:        update,
-		lockTTL:       quotaFlushLockTTL,
-		legacySweepAt: time.Now().Add(time.Hour),
+		getClient:  libredis.GetHarborClient,
+		update:     update,
+		lockTTL:    quotaFlushLockTTL,
+		batchSize:  quotaFlushBatchSize,
+		workers:    quotaFlushWorkers,
+		keyTimeout: quotaFlushKeyTimeout,
+		// out of the legacy sweep window
+		legacySweepEnd: time.Now(),
 	}
 }
 
@@ -99,6 +106,10 @@ func (s *FlushTestSuite) flushed(referenceID string) (int64, bool) {
 }
 
 func (s *FlushTestSuite) setQuota(referenceID string, used int64, dirty bool) string {
+	return s.setQuotaWithTTL(referenceID, used, dirty, time.Minute)
+}
+
+func (s *FlushTestSuite) setQuotaWithTTL(referenceID string, used int64, dirty bool, ttl time.Duration) string {
 	key := fmt.Sprintf("%smock:%s", quotaKeyPrefix, referenceID)
 	q := &quota.Quota{Reference: "mock", ReferenceID: referenceID}
 	q.SetHard(types.ResourceList{types.ResourceStorage: 1000})
@@ -106,7 +117,7 @@ func (s *FlushTestSuite) setQuota(referenceID string, used int64, dirty bool) st
 	val, err := cache.DefaultCodec().Encode(q)
 	s.Require().NoError(err)
 	_, err = s.client.TxPipelined(s.ctx, func(p redis.Pipeliner) error {
-		p.Set(s.ctx, key, val, time.Minute)
+		p.Set(s.ctx, key, val, ttl)
 		if dirty {
 			p.SAdd(s.ctx, quotaDirtySetKey, key)
 		}
@@ -119,6 +130,12 @@ func (s *FlushTestSuite) setQuota(referenceID string, used int64, dirty bool) st
 
 func (s *FlushTestSuite) dirtyKeys() []string {
 	keys, err := s.client.SMembers(s.ctx, quotaDirtySetKey).Result()
+	s.Require().NoError(err)
+	return keys
+}
+
+func (s *FlushTestSuite) flushingKeys() []string {
+	keys, err := s.client.SMembers(s.ctx, quotaFlushingSetKey).Result()
 	s.Require().NoError(err)
 	return keys
 }
@@ -235,11 +252,13 @@ func (s *FlushTestSuite) TestSkipWhenLockHeldByOthers() {
 }
 
 func (s *FlushTestSuite) TestConcurrentFlushers() {
-	for range 20 {
+	for range 25 {
 		s.setQuota(uuid.NewString(), 1, true)
 	}
 
 	var running, maxRunning, calls atomic.Int32
+	var blocked atomic.Bool
+	entered, release := make(chan struct{}), make(chan struct{})
 	update := func(_ context.Context, _ *quota.Quota) error {
 		n := running.Add(1)
 		defer running.Add(-1)
@@ -250,27 +269,266 @@ func (s *FlushTestSuite) TestConcurrentFlushers() {
 			}
 		}
 		calls.Add(1)
-		time.Sleep(5 * time.Millisecond)
+		// block the first flusher in the middle of its first batch
+		if blocked.CompareAndSwap(false, true) {
+			close(entered)
+			<-release
+		}
 		return nil
 	}
+	newFlusher := func() *quotaFlusher {
+		f := s.newFlusher(update)
+		f.batchSize = 10
+		f.workers = 1
+		return f
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		newFlusher().flush(s.ctx)
+	}()
+	<-entered
 
 	var wg sync.WaitGroup
-	for range 5 {
+	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.newFlusher(update).flush(s.ctx)
+			newFlusher().flush(s.ctx)
 		}()
 	}
 	wg.Wait()
+	s.Equal(int32(1), calls.Load(), "no other flusher should run while the lock is held")
 
+	close(release)
+	<-done
 	s.Equal(int32(1), maxRunning.Load(), "only one flusher should run at a time")
-	s.Equal(int32(20), calls.Load(), "each dirty key should be flushed exactly once")
+	s.Equal(int32(25), calls.Load(), "each dirty key should be flushed exactly once")
 	s.Empty(s.dirtyKeys())
+	s.Empty(s.flushingKeys())
+}
+
+func (s *FlushTestSuite) TestStaleWriteAfterLockLostIsRewritten() {
+	id := uuid.NewString()
+	key := s.setQuota(id, 1, true)
+
+	entered, resume := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	a := s.newFlusher(func(ctx context.Context, q *quota.Quota) error {
+		// a has read the value 1 and is blocked before writing it
+		once.Do(func() {
+			close(entered)
+			<-resume
+		})
+		return s.record(ctx, q)
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		a.flush(s.ctx)
+	}()
+	<-entered
+
+	// the lock of a expires, b takes over and writes the newer value
+	s.Require().NoError(s.client.Del(s.ctx, quotaFlushLockKey).Err())
+	s.setQuota(id, 2, true)
+	b := s.newFlusher(nil)
+	b.flush(s.ctx)
+	used, _ := s.flushed(id)
+	s.Require().Equal(int64(2), used)
+
+	// a writes the stale value after losing the lock
+	close(resume)
+	<-done
+	used, _ = s.flushed(id)
+	s.Require().Equal(int64(1), used)
+	s.Contains(s.dirtyKeys(), key, "the key should be marked dirty for the latest value to be written again")
+
+	b.flush(s.ctx)
+	used, _ = s.flushed(id)
+	s.Equal(int64(2), used)
+	s.Empty(s.dirtyKeys())
+	s.Empty(s.flushingKeys())
+}
+
+func (s *FlushTestSuite) TestCrashedFlushIsRecovered() {
+	ids := make([]string, 0, 10)
+	for range 10 {
+		id := uuid.NewString()
+		ids = append(ids, id)
+		s.setQuota(id, 7, true)
+	}
+
+	// the flusher dies after claiming the keys and before flushing any of them
+	s.Require().NoError(claimScript.Load(s.ctx, s.client).Err())
+	client := redis.NewClient(&redis.Options{Addr: s.client.Options().Addr, DB: s.client.Options().DB})
+	defer client.Close()
+	client.AddHook(&afterHook{
+		match: isClaim,
+		after: func() error {
+			runtime.Goexit()
+			return nil
+		},
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		f := s.newFlusher(nil)
+		f.getClient = func() (*redis.Client, error) { return client, nil }
+		f.flush(s.ctx)
+	}()
+	<-done
+	s.Empty(s.dirtyKeys())
+	s.Len(s.flushingKeys(), 10)
+
+	s.newFlusher(nil).flush(s.ctx)
+	for _, id := range ids {
+		used, ok := s.flushed(id)
+		s.True(ok)
+		s.Equal(int64(7), used)
+	}
+	s.Empty(s.dirtyKeys())
+	s.Empty(s.flushingKeys())
+}
+
+// afterHook runs the matching commands, then calls after and reports its error to the client
+type afterHook struct {
+	match func(cmd redis.Cmder) bool
+	after func() error
+}
+
+func (h *afterHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *afterHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *afterHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if err := next(ctx, cmd); err != nil || !h.match(cmd) {
+			return err
+		}
+		return h.after()
+	}
+}
+
+func isClaim(cmd redis.Cmder) bool {
+	return cmd.Name() == "evalsha" && cmd.Args()[1] == claimScript.Hash()
+}
+
+func (s *FlushTestSuite) TestAmbiguousClaimIsRecovered() {
+	id := uuid.NewString()
+	s.setQuota(id, 7, true)
+
+	s.Require().NoError(claimScript.Load(s.ctx, s.client).Err())
+	client := redis.NewClient(&redis.Options{Addr: s.client.Options().Addr, DB: s.client.Options().DB})
+	defer client.Close()
+	client.AddHook(&afterHook{match: isClaim, after: func() error { return errors.New("connection reset") }})
+
+	// the keys are claimed but the client sees an error
+	f := s.newFlusher(nil)
+	f.getClient = func() (*redis.Client, error) { return client, nil }
+	f.flush(s.ctx)
+	_, ok := s.flushed(id)
+	s.False(ok)
+	s.Empty(s.dirtyKeys())
+
+	s.newFlusher(nil).flush(s.ctx)
+	used, ok := s.flushed(id)
+	s.True(ok)
+	s.Equal(int64(7), used)
+	s.Empty(s.flushingKeys())
+}
+
+func (s *FlushTestSuite) TestSlowQuotaDoesNotExpireOthers() {
+	for i := range 2 {
+		key := s.setQuota(uuid.NewString(), int64(i), true)
+		s.Require().NoError(s.client.PExpire(s.ctx, key, 500*time.Millisecond).Err())
+	}
+
+	var slowKey string
+	var once sync.Once
+	f := s.newFlusher(func(ctx context.Context, q *quota.Quota) error {
+		slow := false
+		once.Do(func() {
+			slow = true
+			slowKey = quotaKeyPrefix + "mock:" + q.ReferenceID
+		})
+		if slow {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(2 * time.Second):
+			}
+		}
+		return s.record(ctx, q)
+	})
+	f.keyTimeout = 100 * time.Millisecond
+	f.flush(s.ctx)
+
+	s.Len(s.updated, 1, "the other quota should be flushed before it expires")
+	s.Equal([]string{slowKey}, s.dirtyKeys(), "the slow quota should be retried")
+}
+
+func (s *FlushTestSuite) TestTimeoutsDoNotExpireOthers() {
+	// the per quota timeout and the ttl keep the production ratio of 5s to 5m,
+	// more than 60 timeouts in a row would let the remaining quotas expire
+	slow := map[string]bool{}
+	for i := range 100 {
+		id := uuid.NewString()
+		slow[id] = true
+		s.setQuotaWithTTL(id, int64(i), true, 3*time.Second)
+	}
+	fast := make([]string, 0, 20)
+	for i := range 20 {
+		id := uuid.NewString()
+		fast = append(fast, id)
+		s.setQuotaWithTTL(id, int64(i), true, 3*time.Second)
+	}
+
+	f := s.newFlusher(func(ctx context.Context, q *quota.Quota) error {
+		if slow[q.ReferenceID] {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+		return s.record(ctx, q)
+	})
+	f.keyTimeout = 50 * time.Millisecond
+	f.flush(s.ctx)
+
+	for i, id := range fast {
+		used, ok := s.flushed(id)
+		s.True(ok, "the quota should be flushed before it expires")
+		s.Equal(int64(i), used)
+	}
+	s.Len(s.dirtyKeys(), 100, "the slow quotas should be retried")
+	s.Empty(s.flushingKeys())
+}
+
+func (s *FlushTestSuite) TestUpdateStopsRetryingWhenContextDone() {
+	mgr := &quotatesting.Manager{}
+	ctl := &controller{quotaMgr: mgr}
+	q := &quota.Quota{Reference: "mock", ReferenceID: uuid.NewString()}
+	q.SetHard(types.ResourceList{types.ResourceStorage: 100})
+	q.SetUsed(types.ResourceList{types.ResourceStorage: 1})
+	mock.OnAnything(mgr, "GetByRef").Return(q, nil)
+	mock.OnAnything(mgr, "Update").Return(orm.ErrOptimisticLock)
+
+	ctx, cancel := context.WithTimeout(s.ctx, 100*time.Millisecond)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() { errCh <- ctl.Update(ctx, q) }()
+	select {
+	case err := <-errCh:
+		s.ErrorIs(err, context.DeadlineExceeded)
+	case <-time.After(5 * time.Second):
+		s.Fail("Update should stop retrying once the context is done")
+	}
 }
 
 func (s *FlushTestSuite) TestStopWhenLockLost() {
-	for range 10 {
+	for range 20 {
 		s.setQuota(uuid.NewString(), 1, true)
 	}
 
@@ -279,16 +537,18 @@ func (s *FlushTestSuite) TestStopWhenLockLost() {
 		if calls.Add(1) == 1 {
 			// another instance takes over the lock, e.g. after the lock expired
 			s.client.Set(s.ctx, quotaFlushLockKey, "other", time.Minute)
-			time.Sleep(200 * time.Millisecond)
 		}
+		time.Sleep(200 * time.Millisecond)
 		return nil
 	})
 	f.lockTTL = 150 * time.Millisecond
+	f.workers = 4
 	f.flush(s.ctx)
 
-	s.Equal(int32(1), calls.Load())
-	// the keys not flushed are put back
-	s.Len(s.dirtyKeys(), 9)
+	s.Equal(int32(4), calls.Load(), "no quota should be flushed after the lock is lost")
+	// the keys not flushed are put back, and the flushed ones are marked dirty again
+	// as they may have overwritten the values written by the new holder
+	s.Len(s.dirtyKeys(), 20)
 	// the lock of others is not released
 	s.Equal("other", s.client.Get(s.ctx, quotaFlushLockKey).Val())
 }
@@ -316,14 +576,63 @@ func (s *FlushTestSuite) TestSweepLegacyKeys() {
 	f := s.newFlusher(nil)
 	f.flush(s.ctx)
 	_, ok := s.flushed(id)
-	s.False(ok, "legacy keys are not swept before the sweep time")
+	s.False(ok, "legacy keys are not swept out of the sweep window")
 
-	f.legacySweepAt = time.Now().Add(-time.Second)
+	// not swept by an instance not holding the lock
+	f.legacySweepEnd = time.Now().Add(time.Hour)
+	s.Require().NoError(s.client.Set(s.ctx, quotaFlushLockKey, "other", time.Minute).Err())
+	f.flush(s.ctx)
+	s.Empty(s.dirtyKeys())
+	s.Require().NoError(s.client.Del(s.ctx, quotaFlushLockKey).Err())
+
 	f.flush(s.ctx)
 	used, ok := s.flushed(id)
 	s.True(ok)
 	s.Equal(int64(7), used)
-	s.True(f.legacySwept)
+
+	// written by a previous version after the sweep
+	s.setQuota(id, 8, false)
+	f.flush(s.ctx)
+	used, _ = s.flushed(id)
+	s.Equal(int64(7), used, "legacy keys are not swept again within the sweep interval")
+
+	// swept by the lock holder out of its own window while another instance is within its window
+	s.Require().NoError(s.client.Del(s.ctx, quotaLegacySweptKey).Err())
+	s.newFlusher(nil).flush(s.ctx)
+	used, _ = s.flushed(id)
+	s.Equal(int64(8), used)
+
+	// no sweep once all the instances are out of their window
+	s.setQuota(id, 9, false)
+	f.legacySweepEnd = time.Now().Add(-time.Second)
+	s.Require().NoError(s.client.Del(s.ctx, quotaLegacySweepWindowKey, quotaLegacySweptKey).Err())
+	f.flush(s.ctx)
+	used, _ = s.flushed(id)
+	s.Equal(int64(8), used)
+}
+
+func (s *FlushTestSuite) TestFailedLegacySweepIsRetried() {
+	id := uuid.NewString()
+	s.setQuota(id, 7, false)
+
+	client := redis.NewClient(&redis.Options{Addr: s.client.Options().Addr, DB: s.client.Options().DB})
+	defer client.Close()
+	client.AddHook(&afterHook{
+		match: func(cmd redis.Cmder) bool { return cmd.Name() == "scan" },
+		after: func() error { return errors.New("connection reset") },
+	})
+	f := s.newFlusher(nil)
+	f.getClient = func() (*redis.Client, error) { return client, nil }
+	f.legacySweepEnd = time.Now().Add(time.Hour)
+	f.flush(s.ctx)
+	_, ok := s.flushed(id)
+	s.False(ok)
+
+	f.getClient = libredis.GetHarborClient
+	f.flush(s.ctx)
+	used, ok := s.flushed(id)
+	s.True(ok, "the failed sweep should be retried")
+	s.Equal(int64(7), used)
 }
 
 func (s *FlushTestSuite) TestQuotaFlushInterval() {
@@ -344,6 +653,12 @@ func (s *FlushTestSuite) TestQuotaFlushInterval() {
 
 	mgr.Set(s.ctx, common.QuotaFlushIntervalSeconds, -1)
 	s.Equal(defaultQuotaFlushInterval, quotaFlushInterval())
+
+	// overflow time.Duration if converted before capping
+	mgr.Set(s.ctx, common.QuotaFlushIntervalSeconds, "9223372037")
+	s.Equal(maxQuotaFlushInterval, quotaFlushInterval())
+	mgr.Set(s.ctx, common.QuotaFlushIntervalSeconds, "36028797018963968")
+	s.Equal(maxQuotaFlushInterval, quotaFlushInterval())
 }
 
 func TestFlushTestSuite(t *testing.T) {

@@ -22,6 +22,8 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/goharbor/harbor/src/common/dao"
 	"github.com/goharbor/harbor/src/jobservice/job"
 	"github.com/goharbor/harbor/src/lib/cache"
@@ -542,11 +544,8 @@ func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeys() {
 	e.Require().NoError(client.Set(e.ctx, invalidKey, "", 0).Err())
 	defer client.Del(e.ctx, legacyKey, invalidKey)
 
-	defer func(at time.Time) { legacyExecStatusOutdateMigrateAt = at }(legacyExecStatusOutdateMigrateAt)
-	legacyExecStatusOutdateMigrated.Store(false)
-
 	// not migrated before the migration time
-	legacyExecStatusOutdateMigrateAt = time.Now().Add(time.Hour)
+	e.setNextLegacyMigration(time.Now().Add(time.Hour))
 	scanAndRefreshOutdateStatus(e.ctx)
 	e.Equal(int64(1), client.Exists(e.ctx, legacyKey).Val())
 	exec, err := e.executionDAO.Get(e.ctx, id)
@@ -554,14 +553,146 @@ func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeys() {
 	e.Empty(exec.Status)
 
 	// migrated and refreshed after the migration time
-	legacyExecStatusOutdateMigrateAt = time.Now().Add(-time.Second)
+	e.setNextLegacyMigration(time.Now().Add(-time.Second))
 	scanAndRefreshOutdateStatus(e.ctx)
-	e.True(legacyExecStatusOutdateMigrated.Load())
+	e.True(legacyExecStatusOutdateNextMigrate.After(time.Now()))
 	e.Zero(client.Exists(e.ctx, legacyKey).Val())
 	e.Equal(int64(1), client.Exists(e.ctx, invalidKey).Val())
 	exec, err = e.executionDAO.Get(e.ctx, id)
 	e.Require().NoError(err)
 	e.Equal(job.SuccessStatus.String(), exec.Status)
+}
+
+func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeysRetriedOnFailure() {
+	e.T().Setenv("_REDIS_URL_HARBOR", "redis://localhost:6379/0")
+	client, err := libredis.GetHarborClient()
+	e.Require().NoError(err)
+
+	legacyKey := "cache:execution:id:999124:vendor:GC:status_outdate"
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	defer client.Del(e.ctx, legacyKey)
+
+	e.setNextLegacyMigration(time.Now().Add(-time.Second))
+
+	ctx, cancel := context.WithCancel(e.ctx)
+	cancel()
+	scanAndRefreshOutdateStatus(ctx)
+	e.False(legacyExecStatusOutdateNextMigrate.After(time.Now()))
+	e.Equal(int64(1), client.Exists(e.ctx, legacyKey).Val())
+
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Zero(client.Exists(e.ctx, legacyKey).Val())
+}
+
+func (e *executionDAOTestSuite) TestLegacyOutdateKeysMigratedRepeatedly() {
+	e.T().Setenv("_REDIS_URL_HARBOR", "redis://localhost:6379/0")
+	client, err := libredis.GetHarborClient()
+	e.Require().NoError(err)
+
+	legacyKey := "cache:execution:id:999125:vendor:GC:status_outdate"
+	e.Require().NoError(client.Del(e.ctx, execStatusOutdateSetKey).Err())
+	defer client.Del(e.ctx, legacyKey, execStatusOutdateSetKey)
+
+	defer func(d ExecutionDAO) { ExecDAO = d }(ExecDAO)
+	fake := &fakeRefreshExecDAO{current: "Running"}
+	ExecDAO = fake
+
+	e.setNextLegacyMigration(time.Now().Add(-time.Second))
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal("Running", fake.refreshed)
+
+	// an instance of the previous version writes the final status after the migration
+	fake.current = "Success"
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal("Running", fake.refreshed, "not migrated before the next migration time")
+
+	legacyExecStatusOutdateNextMigrate = time.Now().Add(-time.Second)
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal("Success", fake.refreshed)
+	e.Zero(client.Exists(e.ctx, legacyKey).Val())
+
+	// no migration after the end, even if the last one failed
+	fake.current = "Stopped"
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	legacyExecStatusOutdateNextMigrate = time.Now().Add(-2 * time.Hour)
+	legacyExecStatusOutdateMigrateEnd = time.Now().Add(-time.Hour)
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal("Success", fake.refreshed)
+	e.Equal(int64(1), client.Exists(e.ctx, legacyKey).Val())
+}
+
+// setNextLegacyMigration sets when the legacy outdate keys are migrated next, within the migration window
+func (e *executionDAOTestSuite) setNextLegacyMigration(next time.Time) {
+	prevNext, prevEnd := legacyExecStatusOutdateNextMigrate, legacyExecStatusOutdateMigrateEnd
+	e.T().Cleanup(func() {
+		legacyExecStatusOutdateNextMigrate, legacyExecStatusOutdateMigrateEnd = prevNext, prevEnd
+	})
+	legacyExecStatusOutdateNextMigrate = next
+	legacyExecStatusOutdateMigrateEnd = time.Now().Add(time.Hour)
+}
+
+type fakeRefreshExecDAO struct {
+	ExecutionDAO
+	current, refreshed string
+}
+
+func (f *fakeRefreshExecDAO) RefreshStatus(context.Context, int64) (bool, string, error) {
+	f.refreshed = f.current
+	return true, f.current, nil
+}
+
+// beforeCmdHook calls before ahead of each command other than SCAN
+type beforeCmdHook struct {
+	before func()
+}
+
+func (h *beforeCmdHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *beforeCmdHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *beforeCmdHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() != "scan" {
+			h.before()
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeyIsAtomic() {
+	e.T().Setenv("_REDIS_URL_HARBOR", "redis://localhost:6379/0")
+	client, err := libredis.GetHarborClient()
+	e.Require().NoError(err)
+
+	legacyKey := "cache:execution:id:999123:vendor:GC:status_outdate"
+	e.Require().NoError(client.Del(e.ctx, execStatusOutdateSetKey).Err())
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	defer client.Del(e.ctx, legacyKey, execStatusOutdateSetKey)
+
+	defer func(d ExecutionDAO) { ExecDAO = d }(ExecDAO)
+	fake := &fakeRefreshExecDAO{current: "v0"}
+	ExecDAO = fake
+	e.setNextLegacyMigration(time.Now().Add(time.Hour))
+
+	migrationClient := redis.NewClient(&redis.Options{Addr: client.Options().Addr, DB: client.Options().DB})
+	defer migrationClient.Close()
+	n := 0
+	migrationClient.AddHook(&beforeCmdHook{before: func() {
+		// a new instance consumes the set, then an instance of the previous version
+		// updates the status and writes the legacy key
+		scanAndRefreshOutdateStatus(e.ctx)
+		n++
+		fake.current = fmt.Sprintf("v%d", n)
+		e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	}})
+	e.Require().NoError(migrateLegacyOutdateKeys(e.ctx, migrationClient))
+
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal(fake.current, fake.refreshed, "the latest status should be refreshed")
 }
 
 func TestExecutionDAOSuite(t *testing.T) {
