@@ -15,6 +15,7 @@
 package backend
 
 import (
+	"fmt"
 	"os"
 	"strings"
 
@@ -58,63 +59,111 @@ func (sl *StdOutputLogger) WithKey(key string) *StdOutputLogger {
 	}
 }
 
-func (sl *StdOutputLogger) args(v []any) []any {
-	if len(sl.prefix) == 0 {
-		return v
+// tag prefixes every line of msg. A trailing newline is left alone since the
+// formatter only adds one when missing.
+func (sl *StdOutputLogger) tag(msg string) string {
+	body, nl := strings.CutSuffix(msg, "\n")
+	body = sl.prefix + strings.ReplaceAll(body, "\n", "\n"+sl.prefix)
+	if nl {
+		body += "\n"
 	}
-	return append([]any{sl.prefix}, v...)
+	return body
 }
 
-func (sl *StdOutputLogger) format(format string) string {
-	return strings.ReplaceAll(sl.prefix, "%", "%%") + format
+// enabled reports whether a message at lvl will be written, so suppressed
+// messages are not formatted.
+func (sl *StdOutputLogger) enabled(lvl log.Level) bool {
+	return sl.backendLogger.GetLevel() <= lvl
 }
+
+// Each method calls the backend directly to keep the configured caller depth.
 
 // Debug ...
 func (sl *StdOutputLogger) Debug(v ...any) {
-	sl.backendLogger.Debug(sl.args(v)...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Debug(v...)
+	} else if sl.enabled(log.DebugLevel) {
+		sl.backendLogger.Debug(sl.tag(fmt.Sprint(v...)))
+	}
 }
 
 // Debugf with format
 func (sl *StdOutputLogger) Debugf(format string, v ...any) {
-	sl.backendLogger.Debugf(sl.format(format), v...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Debugf(format, v...)
+	} else if sl.enabled(log.DebugLevel) {
+		sl.backendLogger.Debug(sl.tag(fmt.Sprintf(format, v...)))
+	}
 }
 
 // Info ...
 func (sl *StdOutputLogger) Info(v ...any) {
-	sl.backendLogger.Info(sl.args(v)...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Info(v...)
+	} else if sl.enabled(log.InfoLevel) {
+		sl.backendLogger.Info(sl.tag(fmt.Sprint(v...)))
+	}
 }
 
 // Infof with format
 func (sl *StdOutputLogger) Infof(format string, v ...any) {
-	sl.backendLogger.Infof(sl.format(format), v...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Infof(format, v...)
+	} else if sl.enabled(log.InfoLevel) {
+		sl.backendLogger.Info(sl.tag(fmt.Sprintf(format, v...)))
+	}
 }
 
 // Warning ...
 func (sl *StdOutputLogger) Warning(v ...any) {
-	sl.backendLogger.Warning(sl.args(v)...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Warning(v...)
+	} else if sl.enabled(log.WarningLevel) {
+		sl.backendLogger.Warning(sl.tag(fmt.Sprint(v...)))
+	}
 }
 
 // Warningf with format
 func (sl *StdOutputLogger) Warningf(format string, v ...any) {
-	sl.backendLogger.Warningf(sl.format(format), v...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Warningf(format, v...)
+	} else if sl.enabled(log.WarningLevel) {
+		sl.backendLogger.Warning(sl.tag(fmt.Sprintf(format, v...)))
+	}
 }
 
 // Error ...
 func (sl *StdOutputLogger) Error(v ...any) {
-	sl.backendLogger.Error(sl.args(v)...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Error(v...)
+	} else if sl.enabled(log.ErrorLevel) {
+		sl.backendLogger.Error(sl.tag(fmt.Sprint(v...)))
+	}
 }
 
 // Errorf with format
 func (sl *StdOutputLogger) Errorf(format string, v ...any) {
-	sl.backendLogger.Errorf(sl.format(format), v...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Errorf(format, v...)
+	} else if sl.enabled(log.ErrorLevel) {
+		sl.backendLogger.Error(sl.tag(fmt.Sprintf(format, v...)))
+	}
 }
 
 // Fatal error
 func (sl *StdOutputLogger) Fatal(v ...any) {
-	sl.backendLogger.Fatal(sl.args(v)...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Fatal(v...)
+	} else {
+		sl.backendLogger.Fatal(sl.tag(fmt.Sprint(v...)))
+	}
 }
 
 // Fatalf error
 func (sl *StdOutputLogger) Fatalf(format string, v ...any) {
-	sl.backendLogger.Fatalf(sl.format(format), v...)
+	if len(sl.prefix) == 0 {
+		sl.backendLogger.Fatalf(format, v...)
+	} else {
+		sl.backendLogger.Fatal(sl.tag(fmt.Sprintf(format, v...)))
+	}
 }
