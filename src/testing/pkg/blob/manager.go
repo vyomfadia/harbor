@@ -72,6 +72,24 @@ func (_m *Manager) AssociateWithProject(ctx context.Context, blobID int64, proje
 	return r0, r1
 }
 
+// AssociateWithProjectByDigests provides a mock function with given fields: ctx, blobDigests, projectID
+func (_m *Manager) AssociateWithProjectByDigests(ctx context.Context, blobDigests []string, projectID int64) error {
+	ret := _m.Called(ctx, blobDigests, projectID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for AssociateWithProjectByDigests")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, []string, int64) error); ok {
+		r0 = rf(ctx, blobDigests, projectID)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
 // CalculateTotalSize provides a mock function with given fields: ctx, excludeForeignLayer
 func (_m *Manager) CalculateTotalSize(ctx context.Context, excludeForeignLayer bool) (int64, error) {
 	ret := _m.Called(ctx, excludeForeignLayer)

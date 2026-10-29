@@ -70,6 +70,10 @@ type DAO interface {
 	// CreateProjectBlob create ProjectBlob and ignore conflict on project id and blob id
 	CreateProjectBlob(ctx context.Context, projectID, blobID int64) (int64, error)
 
+	// AssociateBlobsWithProject associates the blobs with the project and ignores conflicts,
+	// a not found error is returned when any of the blobs does not exist
+	AssociateBlobsWithProject(ctx context.Context, projectID int64, blobDigests []string) error
+
 	// DeleteProjectBlob delete project blob
 	DeleteProjectBlob(ctx context.Context, projectID int64, blobIDs ...int64) error
 
@@ -99,13 +103,25 @@ func (d *dao) CreateArtifactAndBlob(ctx context.Context, artifactDigest, blobDig
 		return 0, err
 	}
 
-	md := &models.ArtifactAndBlob{
-		DigestAF:     artifactDigest,
-		DigestBlob:   blobDigest,
-		CreationTime: time.Now(),
+	// see CreateProjectBlob for why DO NOTHING is used
+	var id int64
+	sql := `INSERT INTO artifact_blob (digest_af, digest_blob, creation_time) VALUES (?, ?, ?)
+ON CONFLICT (digest_af, digest_blob) DO NOTHING RETURNING id`
+	err = o.Raw(sql, artifactDigest, blobDigest, time.Now()).QueryRow(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, orm.ErrNoRows) {
+		return 0, err
 	}
 
-	return o.InsertOrUpdate(md, "digest_af, digest_blob")
+	// no row is returned when the association already exists
+	sql = `SELECT id FROM artifact_blob WHERE digest_af = ? AND digest_blob = ?`
+	if err := o.Raw(sql, artifactDigest, blobDigest).QueryRow(&id); err != nil {
+		return 0, orm.WrapNotFoundError(err, "not found by artifact digest %s and blob digest %s", artifactDigest, blobDigest)
+	}
+
+	return id, nil
 }
 
 func (d *dao) GetArtifactAndBlob(ctx context.Context, artifactDigest, blobDigest string) (*models.ArtifactAndBlob, error) {
@@ -342,14 +358,78 @@ func (d *dao) CreateProjectBlob(ctx context.Context, projectID, blobID int64) (i
 		return 0, err
 	}
 
-	md := &models.ProjectBlob{
-		ProjectID:    projectID,
-		BlobID:       blobID,
-		CreationTime: time.Now(),
+	// DO NOTHING instead of DO UPDATE, the latter row-locks the existing association until
+	// the transaction ends, which deadlocks concurrent pushes sharing blobs
+	var id int64
+	sql := `INSERT INTO project_blob (project_id, blob_id, creation_time) VALUES (?, ?, ?)
+ON CONFLICT (project_id, blob_id) DO NOTHING RETURNING id`
+	err = o.Raw(sql, projectID, blobID, time.Now()).QueryRow(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, orm.ErrNoRows) {
+		return 0, err
 	}
 
-	// ignore conflict error on (blob_id, project_id)
-	return o.InsertOrUpdate(md, "blob_id, project_id")
+	// no row is returned when the association already exists
+	sql = `SELECT id FROM project_blob WHERE project_id = ? AND blob_id = ?`
+	if err := o.Raw(sql, projectID, blobID).QueryRow(&id); err != nil {
+		return 0, orm.WrapNotFoundError(err, "project blob not found by project id %d and blob id %d", projectID, blobID)
+	}
+
+	return id, nil
+}
+
+func (d *dao) AssociateBlobsWithProject(ctx context.Context, projectID int64, blobDigests []string) error {
+	digests := make([]any, 0, len(blobDigests))
+	seen := make(map[string]struct{}, len(blobDigests))
+	for _, digest := range blobDigests {
+		if _, ok := seen[digest]; !ok {
+			seen[digest] = struct{}{}
+			digests = append(digests, digest)
+		}
+	}
+	if len(digests) == 0 {
+		return nil
+	}
+
+	o, err := orm.FromContext(ctx)
+	if err != nil {
+		return err
+	}
+
+	// insert the rows sorted by blob id: inserting a row that another in-progress transaction
+	// is inserting waits for it, so concurrent transactions must use the same order to avoid deadlocks
+	var blobs []*models.Blob
+	sql := fmt.Sprintf(`SELECT id, digest FROM blob WHERE digest IN (%s) ORDER BY id`, orm.ParamPlaceholderForIn(len(digests)))
+	if _, err := o.Raw(sql, digests...).QueryRows(&blobs); err != nil {
+		return err
+	}
+
+	if len(blobs) != len(digests) {
+		found := make(map[string]struct{}, len(blobs))
+		for _, blob := range blobs {
+			found[blob.Digest] = struct{}{}
+		}
+		for _, digest := range digests {
+			if _, ok := found[digest.(string)]; !ok {
+				return errors.NotFoundError(nil).WithMessagef("blob %s not found", digest)
+			}
+		}
+	}
+
+	// see CreateProjectBlob for why DO NOTHING is used
+	now := time.Now()
+	values := make([]string, 0, len(blobs))
+	params := make([]any, 0, len(blobs)*3)
+	for _, blob := range blobs {
+		values = append(values, "(?, ?, ?)")
+		params = append(params, projectID, blob.ID, now)
+	}
+	sql = fmt.Sprintf(`INSERT INTO project_blob (project_id, blob_id, creation_time) VALUES %s
+ON CONFLICT (project_id, blob_id) DO NOTHING`, strings.Join(values, ", "))
+	_, err = o.Raw(sql, params...).Exec()
+	return err
 }
 
 func (d *dao) ExistProjectBlob(ctx context.Context, projectID int64, blobDigest string) (bool, error) {
