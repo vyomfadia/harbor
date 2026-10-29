@@ -207,7 +207,7 @@ func createLoggers(jobID string) (logger.Interface, error) {
 				lOptions = append(lOptions, logger.BackendOption(lc.Name, lc.Level, fSettings))
 			}
 		} else if lc.Name == logger.NameStdOutput {
-			// Tag the shared std output with the job ID so the log lines of each job can be found
+			// tag the shared std output with the job ID
 			sSettings := map[string]any{}
 			maps.Copy(sSettings, lc.Settings)
 			sSettings["key"] = jobID

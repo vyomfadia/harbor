@@ -90,7 +90,7 @@ func GetLogger(loggerOptions ...Option) (Interface, error) {
 			singletons.Store(name, l)
 		}
 
-		// The std output logger is shared, tag its output with the key (e.g. the job ID) if provided
+		// the std output logger is shared, tag its output with the key if provided
 		if sl, isStd := l.(*backend.StdOutputLogger); isStd {
 			if key := optionString(ops, "key"); len(key) > 0 {
 				l = sl.WithKey(key)

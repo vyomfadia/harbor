@@ -32,7 +32,7 @@ const (
 // It outputs the log to the stdout/stderr.
 type StdOutputLogger struct {
 	backendLogger *log.Logger
-	// prefix is prepended to every log message, e.g. to identify the job writing the log
+	// prefix is prepended to every log message
 	prefix string
 }
 
@@ -50,8 +50,7 @@ func NewStdOutputLogger(level string, output string, depth int) *StdOutputLogger
 	}
 }
 
-// WithKey returns a copy of the logger sharing the same output which prefixes every
-// message with the given key, so that the logs of concurrent jobs can be told apart.
+// WithKey returns a copy of the logger which prefixes every message with the key
 func (sl *StdOutputLogger) WithKey(key string) *StdOutputLogger {
 	return &StdOutputLogger{
 		backendLogger: sl.backendLogger,

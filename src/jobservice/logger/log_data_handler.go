@@ -21,7 +21,6 @@ import (
 	"github.com/goharbor/harbor/src/jobservice/logger/getter"
 )
 
-// noLogDataGetterHint explains why the job log is unavailable when none of the job loggers provides a getter.
 var noLogDataGetterHint = fmt.Sprintf("no job logger supporting log retrieval (%s or %s) is configured, "+
 	"the job log is only available in the job service output; enable the %s or %s job logger to make it retrievable",
 	NameFile, NameDB, NameFile, NameDB)
@@ -30,8 +29,7 @@ var noLogDataGetterHint = fmt.Sprintf("no job logger supporting log retrieval (%
 func Retrieve(logID string) ([]byte, error) {
 	val, ok := singletons.Load(systemKeyLogDataGetter)
 	if !ok {
-		// None of the configured job loggers supports reading the log back (e.g. only STD_OUTPUT is
-		// configured), so return a not found error with a hint instead of an opaque internal error.
+		// e.g. only STD_OUTPUT is configured, return not found with a hint rather than an internal error
 		return nil, errs.NoObjectFoundError(fmt.Sprintf("log of job %s: %s", logID, noLogDataGetterHint))
 	}
 
