@@ -20,11 +20,14 @@ import (
 	"testing"
 	"time"
 
+	beegoorm "github.com/beego/beego/v2/client/orm"
 	"github.com/docker/distribution/manifest/schema2"
 	"github.com/google/uuid"
+	"github.com/opencontainers/go-digest"
 	"github.com/stretchr/testify/suite"
 
 	"github.com/goharbor/harbor/src/lib/errors"
+	"github.com/goharbor/harbor/src/lib/orm"
 	pkg_blob "github.com/goharbor/harbor/src/pkg/blob"
 	"github.com/goharbor/harbor/src/pkg/blob/models"
 	"github.com/goharbor/harbor/src/pkg/distribution"
@@ -285,6 +288,80 @@ func (suite *ControllerTestSuite) TestSync() {
 			suite.Nil(Ctl.Sync(ctx, references))
 		}
 	})
+}
+
+// writeHookTx calls before and after around the first write of the transaction
+type writeHookTx struct {
+	beegoorm.TxOrmer
+	before, after func()
+}
+
+func (tx *writeHookTx) write(f func() error) error {
+	before, after := tx.before, tx.after
+	tx.before, tx.after = nil, nil
+	if before != nil {
+		before()
+	}
+	err := f()
+	if after != nil {
+		after()
+	}
+	return err
+}
+
+func (tx *writeHookTx) Update(md any, cols ...string) (n int64, err error) {
+	err = tx.write(func() error { n, err = tx.TxOrmer.Update(md, cols...); return err })
+	return
+}
+
+func (tx *writeHookTx) InsertOrUpdate(md any, colConflitAndArgs ...string) (id int64, err error) {
+	err = tx.write(func() error { id, err = tx.TxOrmer.InsertOrUpdate(md, colConflitAndArgs...); return err })
+	return
+}
+
+func (suite *ControllerTestSuite) TestSyncConcurrently() {
+	a, b := suite.DigestString(), suite.DigestString()
+	if a > b {
+		a, b = b, a
+	}
+	_, err := Ctl.Ensure(suite.Context(), b, "old", 1)
+	suite.Require().NoError(err)
+
+	references := []distribution.Descriptor{
+		{MediaType: "new", Digest: digest.Digest(b), Size: 1},
+		{MediaType: "new", Digest: digest.Digest(a), Size: 1},
+	}
+
+	tx1, err := beegoorm.NewOrm().Begin()
+	suite.Require().NoError(err)
+	defer tx1.Rollback()
+	tx2, err := beegoorm.NewOrm().Begin()
+	suite.Require().NoError(err)
+	defer tx2.Rollback()
+	var pid2 int
+	suite.Require().NoError(tx2.Raw("SELECT pg_backend_pid()").QueryRow(&pid2))
+
+	// the first sync finds a missing and b to update, a is created by others before its first
+	// write, and the second sync, finding both to update, starts after the first write
+	errs := make(chan error, 1)
+	hook := &writeHookTx{TxOrmer: tx1}
+	hook.before = func() {
+		_, err := Ctl.Ensure(suite.Context(), a, "old", 1)
+		suite.Require().NoError(err)
+	}
+	hook.after = func() {
+		go func() { errs <- Ctl.Sync(orm.NewContext(context.TODO(), tx2), references) }()
+		suite.Eventually(func() bool {
+			var waiting bool
+			err := beegoorm.NewOrm().Raw("SELECT wait_event_type = 'Lock' FROM pg_stat_activity WHERE pid = ?", pid2).QueryRow(&waiting)
+			return err == nil && waiting
+		}, 5*time.Second, time.Millisecond)
+	}
+
+	suite.NoError(Ctl.Sync(orm.NewContext(context.TODO(), hook), references))
+	suite.NoError(tx1.Commit())
+	suite.NoError(<-errs)
+	suite.NoError(tx2.Commit())
 }
 
 func (suite *ControllerTestSuite) TestGetSetAcceptedBlobSize() {

@@ -89,11 +89,14 @@ func CopyArtifactMiddleware() func(http.Handler) http.Handler {
 			return err
 		}
 
+		// associate in one batch, which locks the rows in the same order as concurrent pushes to avoid deadlocks
+		blobDigests := make([]string, 0, len(blobs))
 		for _, blob := range blobs {
-			if err := blobController.AssociateWithProjectByID(ctx, blob.ID, project.ProjectID); err != nil {
-				logger.Errorf("associate blob %s with project %d failed, error: %v", blob.Digest, project.ProjectID, err)
-				return err
-			}
+			blobDigests = append(blobDigests, blob.Digest)
+		}
+		if err := blobController.AssociateWithProjectByDigests(ctx, blobDigests, project.ProjectID); err != nil {
+			logger.Errorf("associate blobs with project %d failed, error: %v", project.ProjectID, err)
+			return err
 		}
 
 		return nil
