@@ -33,7 +33,6 @@ import (
 
 const redisURL = "redis://127.0.0.1:6379/0"
 
-// sessionCreated returns the current value of the session created counter
 func sessionCreated() float64 {
 	m := &dto.Metric{}
 	_ = metric.SessionCreatedTotal.Write(m)

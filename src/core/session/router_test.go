@@ -35,19 +35,16 @@ type testController struct {
 	web.Controller
 }
 
-// Prepare disables the template rendering
 func (c *testController) Prepare() {
 	c.EnableRender = false
 }
 
-// Get returns the user stored in the session
 func (c *testController) Get() {
 	if u, ok := c.GetSession("user").(string); ok {
 		c.Ctx.WriteString(u)
 	}
 }
 
-// Login populates the user into a regenerated session as the login handlers do
 func (c *testController) Login() {
 	if err := c.SessionRegenerateID(); err != nil {
 		c.CustomAbort(http.StatusInternalServerError, err.Error())
@@ -57,9 +54,6 @@ func (c *testController) Login() {
 	}
 }
 
-// TestRequestsWithoutSessionCookie verifies the requests served by beego only create sessions
-// in the storage when the session holds data, so requests without a session cookie, e.g. the ones
-// sent by registry clients with basic auth, robot accounts or bearer tokens, don't create keys.
 func TestRequestsWithoutSessionCookie(t *testing.T) {
 	config.Init()
 
@@ -117,7 +111,6 @@ func TestRequestsWithoutSessionCookie(t *testing.T) {
 	}
 	assert.Equal(t, created, sessionCreated())
 
-	// login creates the session
 	rec := serve(http.MethodPost, "/c/login", nil)
 	assert.Equal(t, 1, countKeys())
 	assert.Equal(t, created+1, sessionCreated())

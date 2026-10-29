@@ -46,7 +46,7 @@ type Store struct {
 	lock        sync.RWMutex
 	values      map[any]any
 	maxlifetime int64
-	// persisted indicates whether the session already exists in the backend storage
+	// persisted is true if the session exists in the backend storage
 	persisted bool
 }
 
@@ -95,10 +95,8 @@ func (rs *Store) releaseSession(ctx context.Context, _ http.ResponseWriter, requ
 	persisted := rs.persisted
 	rs.lock.RUnlock()
 
-	// Do not persist a session which was newly created for this request and holds no data.
-	// Beego starts a session for every request it serves, so storing these empty sessions would
-	// create a key for every request without a session cookie, e.g. the requests sent by
-	// docker/containerd clients with basic auth, robot accounts or bearer tokens.
+	// Beego starts a session for every request, skip storing new sessions without data
+	// so that cookie-less requests (e.g. docker clients) don't create keys
 	if !persisted && len(values) == 0 {
 		return
 	}
@@ -115,7 +113,7 @@ func (rs *Store) releaseSession(ctx context.Context, _ http.ResponseWriter, requ
 	// the existing TTL in Redis (KeepTTL). This prevents background polling
 	// requests from keeping the session alive indefinitely.
 	exp := time.Duration(systemSessionTimeout(ctx, rs.maxlifetime))
-	// A new session has no TTL to keep, always set the expiration for it.
+	// a new session has no TTL to keep
 	if persisted && lib.GetSkipSessionRenewal(ctx) {
 		exp = goredis.KeepTTL
 	}
@@ -202,8 +200,7 @@ func (rp *Provider) SessionRegenerate(ctx context.Context, oldsid, sid string) (
 		ctx = context.TODO()
 	}
 	maxlifetime := time.Duration(systemSessionTimeout(ctx, rp.maxlifetime))
-	// when the old session doesn't exist, the new session is persisted lazily
-	// when it's released with data, see Store.releaseSession
+	// if the old session doesn't exist, the new one is persisted on release, see releaseSession
 	if isExist, _ := rp.SessionExist(ctx, oldsid); isExist {
 		if rdb, ok := rp.c.(*redis.Cache); ok {
 			// redis has rename command
