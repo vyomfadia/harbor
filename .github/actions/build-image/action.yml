@@ -1,0 +1,150 @@
+name: Build Harbor component image
+description: >-
+  Builds a Harbor component image with upstream's make/photon/<component>/Dockerfile, build scripts and pinned versions
+  on top of upstream's goharbor/harbor-<component>-base images. Expects the source checked out in the workspace.
+
+inputs:
+  image:
+    description: Image name, e.g. harbor-core
+    required: true
+  component:
+    description: Directory under make/photon
+    required: true
+  ref:
+    description: Ref name used for the version tag, default is the triggering ref
+    default: ''
+  base-image-tag:
+    description: 'Tag of the goharbor/harbor-*-base images, default is VERSION if published, else the latest published patch of the same minor, else "dev"'
+    default: ''
+  push:
+    description: Push the tags to the registry (log in first)
+    default: 'false'
+  tags:
+    description: Tags to use instead of ghcr.io/<owner>/<image>:<sha>,<ref>
+    default: ''
+  archive:
+    description: Write the image to this path as a docker archive instead of pushing
+    default: ''
+
+outputs:
+  tags:
+    value: ${{ steps.meta.outputs.tags }}
+  base-tag:
+    value: ${{ steps.meta.outputs.base_tag }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve tags, versions and base image
+      id: meta
+      shell: bash
+      env:
+        IMAGE_NAME: ${{ inputs.image }}
+        COMPONENT: ${{ inputs.component }}
+        INPUT_REF: ${{ inputs.ref }}
+        INPUT_BASE_TAG: ${{ inputs.base-image-tag }}
+        INPUT_TAGS: ${{ inputs.tags }}
+      run: |
+        set -euo pipefail
+        image=$(echo "ghcr.io/$GITHUB_REPOSITORY_OWNER/$IMAGE_NAME" | tr '[:upper:]' '[:lower:]')
+        sha=$(git rev-parse --short=8 HEAD)
+        version=$(cat VERSION)
+
+        ref_name="${INPUT_REF:-$GITHUB_REF_NAME}"
+        ref_name="${ref_name#refs/heads/}"
+        ref_name="${ref_name#refs/tags/}"
+        ref_tag=$(echo "$ref_name" | sed -E 's#[^A-Za-z0-9_.-]+#-#g' | cut -c1-128)
+
+        tags="$image:$sha"
+        version_tag="$sha"
+        # a raw SHA ref is already covered by the sha tag
+        if ! echo "$ref_name" | grep -Eq '^[0-9a-f]{7,40}$'; then
+          tags="$tags,$image:$ref_tag"
+          version_tag="$ref_tag"
+        fi
+        tags="${INPUT_TAGS:-$tags}"
+
+        # upstream publishes base images as :<VERSION> for releases and :dev for main
+        base_ns=goharbor
+        base_repo="$base_ns/harbor-$COMPONENT-base"
+        minor=$(echo "$version" | grep -Eo '^v[0-9]+\.[0-9]+' || true)
+        if [ -n "$INPUT_BASE_TAG" ]; then
+          base_tag="$INPUT_BASE_TAG"
+        elif docker manifest inspect "$base_repo:$version" >/dev/null 2>&1; then
+          base_tag="$version"
+        else
+          base_tag=$(curl -fsSL "https://hub.docker.com/v2/repositories/$base_repo/tags?name=$minor.&page_size=100" \
+            | jq -r '.results[].name' | grep -E "^${minor//./\\.}\.[0-9]+$" | sort -V | tail -n1 || true)
+          base_tag="${base_tag:-dev}"
+        fi
+
+        # upstream's pinned versions, evaluated by make so overrides and derived values match `make build`
+        printf 'print-%%:\n\t@echo $($*)\n' > "$RUNNER_TEMP/print.mk"
+        mkvar() { make -s --no-print-directory -f Makefile -f "$RUNNER_TEMP/print.mk" ARCH=amd64 "print-$1"; }
+
+        {
+          echo "tags=$tags"
+          echo "full_sha=$(git rev-parse HEAD)"
+          echo "version_tag=$version_tag"
+          echo "base_ns=$base_ns"
+          echo "base_tag=$base_tag"
+          for v in GOBUILDIMAGE NODEBUILDIMAGE NPM_REGISTRY REGISTRY_SRC_TAG DISTRIBUTION_SRC; do
+            echo "$v=$(mkvar "$v")"
+          done
+        } | tee -a "$GITHUB_OUTPUT"
+
+        {
+          echo "### $IMAGE_NAME"
+          echo "- commit: \`$(git rev-parse HEAD)\` (VERSION $version)"
+          echo "- base image: \`$base_repo:$base_tag\`"
+          echo "- tags: \`${tags//,/\`, \`}\`"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # mirrors the compile_* targets and the binary steps of upstream's make/photon/Makefile _build_* targets;
+    # runs before Buildx is set up so the builder scripts use the local docker daemon
+    - name: Prepare build context
+      shell: bash
+      env:
+        COMPONENT: ${{ inputs.component }}
+        VERSIONTAG: ${{ steps.meta.outputs.version_tag }}
+        GOBUILDIMAGE: ${{ steps.meta.outputs.GOBUILDIMAGE }}
+        REGISTRY_SRC_TAG: ${{ steps.meta.outputs.REGISTRY_SRC_TAG }}
+        DISTRIBUTION_SRC: ${{ steps.meta.outputs.DISTRIBUTION_SRC }}
+      run: |
+        set -euo pipefail
+        build_registry() {
+          (cd make/photon/registry && ./builder "$REGISTRY_SRC_TAG" "$DISTRIBUTION_SRC" "$GOBUILDIMAGE" default)
+          chmod 655 make/photon/registry/binary/registry
+        }
+        # -o lint_apis skips the swagger spec lint, which needs a node toolchain image
+        case "$COMPONENT" in
+          core) make -o lint_apis versions_prepare compile_core ARCH=amd64 VERSIONTAG="$VERSIONTAG" ;;
+          jobservice) make compile_jobservice ARCH=amd64 ;;
+          registryctl) make compile_registryctl ARCH=amd64 && build_registry ;;
+          registry) build_registry ;;
+        esac
+
+    # only Buildx, installing a different Docker breaks it (see upstream d822d80c2)
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+    - name: Build
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: .
+        file: make/photon/${{ inputs.component }}/Dockerfile
+        platforms: linux/amd64
+        push: ${{ inputs.push == 'true' }}
+        outputs: ${{ inputs.archive != '' && format('type=docker,dest={0}', inputs.archive) || '' }}
+        tags: ${{ steps.meta.outputs.tags }}
+        build-args: |
+          harbor_base_namespace=${{ steps.meta.outputs.base_ns }}
+          harbor_base_image_version=${{ steps.meta.outputs.base_tag }}
+          NODE=${{ steps.meta.outputs.NODEBUILDIMAGE }}
+          npm_registry=${{ steps.meta.outputs.NPM_REGISTRY }}
+        labels: |
+          org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          org.opencontainers.image.revision=${{ steps.meta.outputs.full_sha }}
+          org.opencontainers.image.version=${{ steps.meta.outputs.version_tag }}
+        cache-from: type=gha,scope=${{ inputs.image }}
+        cache-to: ${{ inputs.push == 'true' && format('type=gha,scope={0},mode=max', inputs.image) || '' }}
