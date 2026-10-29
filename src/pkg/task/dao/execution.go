@@ -20,7 +20,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -59,9 +58,10 @@ var (
 	// legacyExecStatusOutdateKeyRegex matches the keys of the previous versions,
 	// e.g. cache:execution:id:100:vendor:REPLICATION:status_outdate
 	legacyExecStatusOutdateKeyRegex = regexp.MustCompile(`^cache:execution:id:(\d+):vendor:([A-Za-z0-9_]+):status_outdate$`)
-	// the migration is delayed until the previous version's instances are gone in a rolling upgrade
-	legacyExecStatusOutdateMigrateAt = time.Now().Add(5 * time.Minute)
-	legacyExecStatusOutdateMigrated  atomic.Bool
+	// the previous version's instances keep writing the legacy keys during a rolling upgrade,
+	// so they are migrated repeatedly until legacyExecStatusOutdateMigrateEnd
+	legacyExecStatusOutdateNextMigrate = time.Now()
+	legacyExecStatusOutdateMigrateEnd  = time.Now().Add(legacyExecStatusOutdateMigrateDuration)
 	// migrateLegacyOutdateKeyScript moves the legacy key KEYS[1] into the set KEYS[2] as ARGV[1]
 	migrateLegacyOutdateKeyScript = redis.NewScript(`
 if redis.call("DEL", KEYS[1]) == 1 then
@@ -81,6 +81,9 @@ const (
 	// maxFailedTasksToQuery is the maximum number of failed tasks queried when aggregating
 	// error status messages for an execution, avoiding unbounded memory and query overhead.
 	maxFailedTasksToQuery = 50
+
+	legacyExecStatusOutdateMigrateInterval = 2 * time.Minute
+	legacyExecStatusOutdateMigrateDuration = 30 * time.Minute
 )
 
 // ExecutionStatusChangePostFunc is the function called after the execution status changed
@@ -568,11 +571,11 @@ func scanAndRefreshOutdateStatus(ctx context.Context) {
 		return
 	}
 
-	if !legacyExecStatusOutdateMigrated.Load() && time.Now().After(legacyExecStatusOutdateMigrateAt) {
+	if now := time.Now(); !now.Before(legacyExecStatusOutdateNextMigrate) && now.Before(legacyExecStatusOutdateMigrateEnd) {
 		if err := migrateLegacyOutdateKeys(ctx, client); err != nil {
 			log.Errorf("failed to migrate the legacy outdate execution keys, will retry, error: %v", err)
 		} else {
-			legacyExecStatusOutdateMigrated.Store(true)
+			legacyExecStatusOutdateNextMigrate = now.Add(legacyExecStatusOutdateMigrateInterval)
 		}
 	}
 
@@ -635,7 +638,7 @@ func scanAndRefreshOutdateStatus(ctx context.Context) {
 }
 
 // migrateLegacyOutdateKeys moves the legacy outdate keys into the set so they are still
-// refreshed after upgrading. It scans the whole keyspace, so it stops once it succeeds in a process.
+// refreshed after upgrading. Migrating a key twice is harmless.
 func migrateLegacyOutdateKeys(ctx context.Context, client *redis.Client) error {
 	var migrated int
 	var lastErr error

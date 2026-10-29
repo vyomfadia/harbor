@@ -544,11 +544,8 @@ func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeys() {
 	e.Require().NoError(client.Set(e.ctx, invalidKey, "", 0).Err())
 	defer client.Del(e.ctx, legacyKey, invalidKey)
 
-	defer func(at time.Time) { legacyExecStatusOutdateMigrateAt = at }(legacyExecStatusOutdateMigrateAt)
-	legacyExecStatusOutdateMigrated.Store(false)
-
 	// not migrated before the migration time
-	legacyExecStatusOutdateMigrateAt = time.Now().Add(time.Hour)
+	e.setNextLegacyMigration(time.Now().Add(time.Hour))
 	scanAndRefreshOutdateStatus(e.ctx)
 	e.Equal(int64(1), client.Exists(e.ctx, legacyKey).Val())
 	exec, err := e.executionDAO.Get(e.ctx, id)
@@ -556,9 +553,9 @@ func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeys() {
 	e.Empty(exec.Status)
 
 	// migrated and refreshed after the migration time
-	legacyExecStatusOutdateMigrateAt = time.Now().Add(-time.Second)
+	e.setNextLegacyMigration(time.Now().Add(-time.Second))
 	scanAndRefreshOutdateStatus(e.ctx)
-	e.True(legacyExecStatusOutdateMigrated.Load())
+	e.True(legacyExecStatusOutdateNextMigrate.After(time.Now()))
 	e.Zero(client.Exists(e.ctx, legacyKey).Val())
 	e.Equal(int64(1), client.Exists(e.ctx, invalidKey).Val())
 	exec, err = e.executionDAO.Get(e.ctx, id)
@@ -575,19 +572,65 @@ func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeysRetriedOnFailure() {
 	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
 	defer client.Del(e.ctx, legacyKey)
 
-	defer func(at time.Time) { legacyExecStatusOutdateMigrateAt = at }(legacyExecStatusOutdateMigrateAt)
-	legacyExecStatusOutdateMigrateAt = time.Now().Add(-time.Second)
-	legacyExecStatusOutdateMigrated.Store(false)
+	e.setNextLegacyMigration(time.Now().Add(-time.Second))
 
 	ctx, cancel := context.WithCancel(e.ctx)
 	cancel()
 	scanAndRefreshOutdateStatus(ctx)
-	e.False(legacyExecStatusOutdateMigrated.Load())
+	e.False(legacyExecStatusOutdateNextMigrate.After(time.Now()))
 	e.Equal(int64(1), client.Exists(e.ctx, legacyKey).Val())
 
 	scanAndRefreshOutdateStatus(e.ctx)
-	e.True(legacyExecStatusOutdateMigrated.Load())
 	e.Zero(client.Exists(e.ctx, legacyKey).Val())
+}
+
+func (e *executionDAOTestSuite) TestLegacyOutdateKeysMigratedRepeatedly() {
+	e.T().Setenv("_REDIS_URL_HARBOR", "redis://localhost:6379/0")
+	client, err := libredis.GetHarborClient()
+	e.Require().NoError(err)
+
+	legacyKey := "cache:execution:id:999125:vendor:GC:status_outdate"
+	e.Require().NoError(client.Del(e.ctx, execStatusOutdateSetKey).Err())
+	defer client.Del(e.ctx, legacyKey, execStatusOutdateSetKey)
+
+	defer func(d ExecutionDAO) { ExecDAO = d }(ExecDAO)
+	fake := &fakeRefreshExecDAO{current: "Running"}
+	ExecDAO = fake
+
+	e.setNextLegacyMigration(time.Now().Add(-time.Second))
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal("Running", fake.refreshed)
+
+	// an instance of the previous version writes the final status after the migration
+	fake.current = "Success"
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal("Running", fake.refreshed, "not migrated before the next migration time")
+
+	legacyExecStatusOutdateNextMigrate = time.Now().Add(-time.Second)
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal("Success", fake.refreshed)
+	e.Zero(client.Exists(e.ctx, legacyKey).Val())
+
+	// no migration after the end, even if the last one failed
+	fake.current = "Stopped"
+	e.Require().NoError(client.Set(e.ctx, legacyKey, "", 0).Err())
+	legacyExecStatusOutdateNextMigrate = time.Now().Add(-2 * time.Hour)
+	legacyExecStatusOutdateMigrateEnd = time.Now().Add(-time.Hour)
+	scanAndRefreshOutdateStatus(e.ctx)
+	e.Equal("Success", fake.refreshed)
+	e.Equal(int64(1), client.Exists(e.ctx, legacyKey).Val())
+}
+
+// setNextLegacyMigration sets when the legacy outdate keys are migrated next, within the migration window
+func (e *executionDAOTestSuite) setNextLegacyMigration(next time.Time) {
+	prevNext, prevEnd := legacyExecStatusOutdateNextMigrate, legacyExecStatusOutdateMigrateEnd
+	e.T().Cleanup(func() {
+		legacyExecStatusOutdateNextMigrate, legacyExecStatusOutdateMigrateEnd = prevNext, prevEnd
+	})
+	legacyExecStatusOutdateNextMigrate = next
+	legacyExecStatusOutdateMigrateEnd = time.Now().Add(time.Hour)
 }
 
 type fakeRefreshExecDAO struct {
@@ -633,8 +676,7 @@ func (e *executionDAOTestSuite) TestMigrateLegacyOutdateKeyIsAtomic() {
 	defer func(d ExecutionDAO) { ExecDAO = d }(ExecDAO)
 	fake := &fakeRefreshExecDAO{current: "v0"}
 	ExecDAO = fake
-	defer func(at time.Time) { legacyExecStatusOutdateMigrateAt = at }(legacyExecStatusOutdateMigrateAt)
-	legacyExecStatusOutdateMigrateAt = time.Now().Add(time.Hour)
+	e.setNextLegacyMigration(time.Now().Add(time.Hour))
 
 	migrationClient := redis.NewClient(&redis.Options{Addr: client.Options().Addr, DB: client.Options().DB})
 	defer migrationClient.Close()
