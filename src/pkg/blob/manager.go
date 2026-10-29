@@ -39,6 +39,9 @@ type Manager interface {
 	// AssociateWithProject associate blob with project
 	AssociateWithProject(ctx context.Context, blobID, projectID int64) (int64, error)
 
+	// AssociateWithProjectByDigests associate blobs with project by blob digests
+	AssociateWithProjectByDigests(ctx context.Context, blobDigests []string, projectID int64) error
+
 	// CalculateTotalSizeByProject returns total blob size by project, skip foreign blobs when `excludeForeignLayer` is true
 	CalculateTotalSizeByProject(ctx context.Context, projectID int64, excludeForeignLayer bool) (int64, error)
 
@@ -89,6 +92,10 @@ func (m *manager) AssociateWithArtifact(ctx context.Context, blobDigest, artifac
 
 func (m *manager) AssociateWithProject(ctx context.Context, blobID, projectID int64) (int64, error) {
 	return m.dao.CreateProjectBlob(ctx, projectID, blobID)
+}
+
+func (m *manager) AssociateWithProjectByDigests(ctx context.Context, blobDigests []string, projectID int64) error {
+	return m.dao.AssociateBlobsWithProject(ctx, projectID, blobDigests)
 }
 
 func (m *manager) CalculateTotalSizeByProject(ctx context.Context, projectID int64, excludeForeignLayer bool) (int64, error) {

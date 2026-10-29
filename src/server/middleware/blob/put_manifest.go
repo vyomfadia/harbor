@@ -85,11 +85,15 @@ func PutManifestMiddleware() func(http.Handler) http.Handler {
 			return err
 		}
 
-		// NOTE: associate all blobs with project because the already exist associations may cleanup by others
+		var blobDigests []string
 		for _, reference := range manifest.References() {
-			if err := blobController.AssociateWithProjectByDigest(ctx, reference.Digest.String(), p.ProjectID); err != nil {
-				return err
-			}
+			blobDigests = append(blobDigests, reference.Digest.String())
+		}
+
+		// NOTE: associate all blobs with project because the already exist associations may cleanup by others
+		if err := blobController.AssociateWithProjectByDigests(ctx, blobDigests, p.ProjectID); err != nil {
+			logger.Errorf("associate blobs of manifest %s with project %d failed, error: %v", descriptor.Digest.String(), p.ProjectID, err)
+			return err
 		}
 
 		// ensure Blob for the manifest
@@ -102,11 +106,6 @@ func PutManifestMiddleware() func(http.Handler) http.Handler {
 		if err := blobController.AssociateWithProjectByID(ctx, blobID, p.ProjectID); err != nil {
 			logger.Errorf("associate manifest with artifact %s failed, error: %v", descriptor.Digest.String(), err)
 			return err
-		}
-
-		var blobDigests []string
-		for _, reference := range manifest.References() {
-			blobDigests = append(blobDigests, reference.Digest.String())
 		}
 
 		// associate blobs of the manifest with artifact

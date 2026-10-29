@@ -17,6 +17,7 @@ package blob
 import (
 	"context"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/docker/distribution"
@@ -46,6 +47,10 @@ type Controller interface {
 
 	// AssociateWithProjectByDigest associate blob with project by blob digest
 	AssociateWithProjectByDigest(ctx context.Context, blobDigest string, projectID int64) error
+
+	// AssociateWithProjectByDigests associate blobs with project by blob digests,
+	// returns a not found error if any blob does not exist
+	AssociateWithProjectByDigests(ctx context.Context, blobDigests []string, projectID int64) error
 
 	// CalculateTotalSizeByProject returns the sum of the blob size for the project
 	CalculateTotalSizeByProject(ctx context.Context, projectID int64, excludeForeign bool) (int64, error)
@@ -142,6 +147,10 @@ func (c *controller) AssociateWithProjectByDigest(ctx context.Context, blobDiges
 
 	_, err = c.blobMgr.AssociateWithProject(ctx, blob.ID, projectID)
 	return err
+}
+
+func (c *controller) AssociateWithProjectByDigests(ctx context.Context, blobDigests []string, projectID int64) error {
+	return c.blobMgr.AssociateWithProjectByDigests(ctx, blobDigests, projectID)
 }
 
 func (c *controller) CalculateTotalSizeByProject(ctx context.Context, projectID int64, excludeForeign bool) (int64, error) {
@@ -293,6 +302,10 @@ func (c *controller) Sync(ctx context.Context, references []distribution.Descrip
 			})
 		}
 	}
+
+	// consistent order to avoid deadlocks between concurrent syncs of the same blobs
+	sort.Slice(updating, func(i, j int) bool { return updating[i].Digest < updating[j].Digest })
+	sort.Slice(missing, func(i, j int) bool { return missing[i].Digest < missing[j].Digest })
 
 	if len(updating) > 0 {
 		err := orm.WithTransaction(func(ctx context.Context) error {
