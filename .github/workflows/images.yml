@@ -1,0 +1,78 @@
+name: Images
+
+# Builds the Harbor component images the fork's deployment uses (see .github/actions/build-image) and pushes them to
+# ghcr.io/<owner>/<upstream image name>.
+
+on:
+  push:
+    branches:
+      - main
+      - 'release-*'
+    tags:
+      - 'v*'
+  pull_request:
+    paths:
+      - .github/workflows/images.yml
+      - Makefile
+      - make/photon/**
+      - .github/actions/build-image/**
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git ref (branch, tag or SHA) to build, default is the selected ref'
+        required: false
+        default: ''
+      base_image_tag:
+        description: 'Tag of the upstream goharbor/harbor-*-base images, default is VERSION if published, else the latest published patch of the same minor, else "dev"'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: images-${{ github.ref }}-${{ inputs.ref }}
+  cancel-in-progress: ${{ github.ref_type == 'branch' }}
+
+jobs:
+  build:
+    name: ${{ matrix.image }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: harbor-core, component: core }
+          - { image: harbor-jobservice, component: jobservice }
+          - { image: harbor-portal, component: portal }
+          - { image: harbor-registryctl, component: registryctl }
+          - { image: registry-photon, component: registry }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+
+      # the build action from this workflow's commit, inputs.ref may predate it
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: .ci
+          sparse-checkout: .github/actions
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: ./.ci/.github/actions/build-image
+        with:
+          image: ${{ matrix.image }}
+          component: ${{ matrix.component }}
+          ref: ${{ inputs.ref }}
+          base-image-tag: ${{ inputs.base_image_tag }}
+          push: ${{ github.event_name != 'pull_request' }}
