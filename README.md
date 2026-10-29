@@ -1,3 +1,42 @@
+## Fork notes
+
+A personal fork of [goharbor/harbor](https://github.com/goharbor/harbor) with a few backend (Go) patches.
+Every image of a deployment with an external database and Redis, no nginx (Ingress/Gateway in front),
+no Trivy and no metrics is published to GHCR, so all components come from the same commit:
+
+| Image | Built from |
+|-------|------------|
+| `ghcr.io/vyomfadia/harbor-core` | `make/photon/core/Dockerfile` |
+| `ghcr.io/vyomfadia/harbor-jobservice` | `make/photon/jobservice/Dockerfile` |
+| `ghcr.io/vyomfadia/harbor-portal` | `make/photon/portal/Dockerfile` |
+| `ghcr.io/vyomfadia/harbor-registryctl` | `make/photon/registryctl/Dockerfile` |
+| `ghcr.io/vyomfadia/registry-photon` | `make/photon/registry/Dockerfile` |
+
+Tags are the 8-char commit SHA, the branch name (`main`, `release-*`) and git tags (`v*`). They are built by
+[`.github/workflows/images.yml`](.github/workflows/images.yml) on pushes to `main`/`release-*`, on `v*` tags,
+or manually, with upstream's Dockerfiles, build scripts and pinned versions (registry from `REGISTRY_SRC_TAG`,
+portal with `NODEBUILDIMAGE`) on upstream's published base images, so they are drop-in replacements.
+
+Helm values for the upstream chart, all with the same tag:
+
+```yaml
+core:
+  image: {repository: ghcr.io/vyomfadia/harbor-core, tag: <tag>}
+jobservice:
+  image: {repository: ghcr.io/vyomfadia/harbor-jobservice, tag: <tag>}
+portal:
+  image: {repository: ghcr.io/vyomfadia/harbor-portal, tag: <tag>}
+registry:
+  registry:
+    image: {repository: ghcr.io/vyomfadia/registry-photon, tag: <tag>}
+  controller:
+    image: {repository: ghcr.io/vyomfadia/harbor-registryctl, tag: <tag>}
+```
+
+GHCR packages are private by default: make them public, or add a pull secret via `imagePullSecrets`.
+
+---
+
 # Harbor
 [![CI](https://github.com/goharbor/harbor/actions/workflows/CI.yml/badge.svg)](https://github.com/goharbor/harbor/actions/workflows/CI.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/goharbor/harbor)](https://goreportcard.com/report/github.com/goharbor/harbor)

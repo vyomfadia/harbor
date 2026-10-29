@@ -1,42 +1,56 @@
 name: Trivy Nightly Scan
+
 on:
   schedule:
-    - cron: '0 2 * * *' # run at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
 
+permissions:
+  contents: read
+  packages: read
+  security-events: write
 
 jobs:
-  nightly-scan:
-    name: Trivy Scan nightly
+  scan:
+    name: ${{ matrix.image }}:${{ matrix.tag }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        # maintain the tags of harbor that need to be actively security scanned on a nightly basis,
-        # it is the image tags that need to be scanned in the dockerhub goharbor, for example: goharbor/harbor-core:dev, dev is the tag.
-        tags: [dev]
-        # list of images that need to be scanned
-        images: [harbor-core, harbor-db, harbor-exporter, harbor-jobservice, harbor-log, harbor-portal, harbor-registryctl, prepare, registry-photon, nginx-photon, valkey-photon, trivy-adapter-photon]
-    permissions:
-      security-events: write  # for github/codeql-action/upload-sarif to upload SARIF results
-      contents: read
-
-    runs-on: cncf-ubuntu-16-64-x86
+        tag: [main, release-2.16-patched]
+        image: [harbor-core, harbor-jobservice, harbor-portal, harbor-registryctl, registry-photon]
     steps:
-      - name: Checkout code
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve image
+        id: ref
+        env:
+          IMAGE: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}:${{ matrix.tag }}
+        run: |
+          image=$(echo "$IMAGE" | tr '[:upper:]' '[:lower:]')
+          if docker manifest inspect "$image" >/dev/null 2>&1; then
+            echo "image=$image" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::$image not found, skipping"
+          fi
       - name: Run Trivy vulnerability scanner
+        if: steps.ref.outputs.image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: 'docker.io/goharbor/${{ matrix.images }}:${{ matrix.tags }}'
-          severity: 'CRITICAL,HIGH'
-          format: 'template'
-          template: '@/contrib/sarif.tpl'
-          output: 'trivy-results.sarif'
+          image-ref: ${{ steps.ref.outputs.image }}
+          severity: CRITICAL,HIGH
+          format: sarif
+          output: trivy-results.sarif
         env:
-          # Use AWS' ECR mirror for the trivy-db image, as GitHub's Container
-          # Registry is returning a TOOMANYREQUESTS error.
-          # Ref: https://github.com/aquasecurity/trivy-action/issues/389
-          TRIVY_DB_REPOSITORY: 'public.ecr.aws/aquasecurity/trivy-db:2'
+          # ghcr.io often rate-limits the trivy-db pulls, see aquasecurity/trivy-action#389
+          TRIVY_DB_REPOSITORY: public.ecr.aws/aquasecurity/trivy-db:2
       - name: Upload Trivy scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@b96794f015dfd88f77b49b1c93e0fa7110f94c63 # v4.38.0
+        if: steps.ref.outputs.image
+        uses: github/codeql-action/upload-sarif@6f2ac81f5cd81fe351a197ba0b00d91d03cd2aee # v4.39.0
         with:
-          sarif_file: 'trivy-results.sarif'
+          sarif_file: trivy-results.sarif
+          category: trivy-${{ matrix.image }}-${{ matrix.tag }}
