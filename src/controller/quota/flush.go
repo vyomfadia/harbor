@@ -37,6 +37,9 @@ const (
 	// quotaDirtySetKey holds the keys of the quotas updated in redis but not flushed to db yet.
 	// It must not match the "cache:*quota:*" pattern scanned by the previous versions.
 	quotaDirtySetKey = "quota:dirty"
+	// quotaFlushingSetKey holds the keys claimed by the flush lock holder but not flushed yet,
+	// the next holder moves them back to the dirty set in case the previous one died.
+	quotaFlushingSetKey = "quota:flushing"
 	// quotaFlushLockKey is the lock ensuring only one instance flushes at a time
 	quotaFlushLockKey = "quota:flush_lock"
 	// quotaFlushLockTTL is extended periodically while flushing
@@ -45,6 +48,15 @@ const (
 	defaultQuotaFlushInterval = 30 * time.Second
 	// maxQuotaFlushInterval is half of quotaExpireTimeout, quotas must be flushed before they expire
 	maxQuotaFlushInterval = 150 * time.Second
+	// quotaFlushKeyTimeout bounds flushing a single quota, so a slow one cannot hold up
+	// the others until they expire
+	quotaFlushKeyTimeout = 5 * time.Second
+
+	// The previous versions do not mark quotas dirty, so the quota keys are swept repeatedly
+	// to cover a rolling upgrade. Sweeps must be less than quotaExpireTimeout - maxQuotaFlushInterval
+	// apart to catch every key written by the previous versions before it expires.
+	legacySweepInterval = 2 * time.Minute
+	legacySweepDuration = 30 * time.Minute
 )
 
 var (
@@ -60,6 +72,36 @@ if redis.call("GET", KEYS[1]) == ARGV[1] then
 	return redis.call("PEXPIRE", KEYS[1], ARGV[2])
 end
 return 0`)
+	// recoverScript moves the keys left in the flushing set back to the dirty set
+	recoverScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+	return redis.error_reply("quota flush lock not held")
+end
+local keys = redis.call("SMEMBERS", KEYS[3])
+for i = 1, #keys, 1000 do
+	redis.call("SADD", KEYS[2], unpack(keys, i, math.min(i + 999, #keys)))
+end
+redis.call("DEL", KEYS[3])
+return #keys`)
+	// claimScript moves at most ARGV[2] keys from the dirty set to the flushing set
+	claimScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then
+	return redis.error_reply("quota flush lock not held")
+end
+local keys = redis.call("SPOP", KEYS[2], ARGV[2])
+if #keys > 0 then
+	redis.call("SADD", KEYS[3], unpack(keys))
+end
+return keys`)
+	// ackScript removes a flushed key from the flushing set. If the lock has been lost, a newer
+	// value written by the new holder may have been overwritten, so the key is marked dirty
+	// again for the latest value to be written.
+	ackScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("SREM", KEYS[3], ARGV[2])
+end
+redis.call("SADD", KEYS[2], ARGV[2])
+return -1`)
 )
 
 // quotaFlushInterval returns the configured flush interval, bounded by maxQuotaFlushInterval.
@@ -70,36 +112,40 @@ func quotaFlushInterval() time.Duration {
 		return defaultQuotaFlushInterval
 	}
 
-	interval := time.Duration(seconds) * time.Second
-	if interval > maxQuotaFlushInterval {
-		log.Warningf("quota flush interval %s exceeds the max value, use the max value %s", interval, maxQuotaFlushInterval)
+	// compare before converting, large values overflow time.Duration
+	if seconds > int64(maxQuotaFlushInterval/time.Second) {
+		log.Warningf("quota flush interval %d seconds exceeds the max value, use the max value %s", seconds, maxQuotaFlushInterval)
 		return maxQuotaFlushInterval
 	}
 
-	return interval
+	return time.Duration(seconds) * time.Second
 }
 
 // quotaFlusher flushes the quotas updated in redis to db
 type quotaFlusher struct {
-	getClient func() (*redis.Client, error)
-	update    func(ctx context.Context, q *quota.Quota) error
-	lockTTL   time.Duration
+	getClient  func() (*redis.Client, error)
+	update     func(ctx context.Context, q *quota.Quota) error
+	lockTTL    time.Duration
+	batchSize  int64
+	keyTimeout time.Duration
 
-	// legacySweepAt is when the one-off sweep of the legacy quota keys runs
-	legacySweepAt time.Time
-	legacySwept   bool
+	// nextLegacySweep is when the legacy quota keys are swept next, no sweep after legacySweepEnd
+	nextLegacySweep time.Time
+	legacySweepEnd  time.Time
 }
 
 func newQuotaFlusher() *quotaFlusher {
+	now := time.Now()
 	return &quotaFlusher{
 		getClient: libredis.GetHarborClient,
 		update: func(ctx context.Context, q *quota.Quota) error {
 			return Ctl.Update(ctx, q)
 		},
-		lockTTL: quotaFlushLockTTL,
-		// sweep after the previous version's instances are gone in a rolling upgrade but before
-		// their quota keys expire: delay + maxQuotaFlushInterval < quotaExpireTimeout
-		legacySweepAt: time.Now().Add(2 * time.Minute),
+		lockTTL:         quotaFlushLockTTL,
+		batchSize:       quotaFlushBatchSize,
+		keyTimeout:      quotaFlushKeyTimeout,
+		nextLegacySweep: now,
+		legacySweepEnd:  now.Add(legacySweepDuration),
 	}
 }
 
@@ -134,7 +180,7 @@ func (f *quotaFlusher) flush(ctx context.Context) {
 	}()
 
 	start := time.Now()
-	flushed, failed := f.drain(ctx, client, lost)
+	flushed, failed := f.drain(ctx, client, token, lost)
 	metric.QuotaFlushDurSummary.Observe(time.Since(start).Seconds())
 	metric.QuotaFlushKeysTotal.WithLabelValues("flushed").Add(float64(flushed))
 	metric.QuotaFlushKeysTotal.WithLabelValues("failed").Add(float64(failed))
@@ -143,11 +189,22 @@ func (f *quotaFlusher) flush(ctx context.Context) {
 	}
 }
 
-// drain pops the keys from the dirty set and flushes them, failed keys are put back for the next round.
+// drain claims the keys from the dirty set and flushes them, failed keys are put back for the next round.
 //
 // A key is removed from the dirty set before its value is read, so an update during
-// the flush marks it dirty again and no update is lost.
-func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, lost *atomic.Bool) (flushed, failed int) {
+// the flush marks it dirty again and no update is lost. A claimed key stays in the
+// flushing set until it is flushed, so it is not lost if this instance dies.
+func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, token string, lost *atomic.Bool) (flushed, failed int) {
+	scriptKeys := []string{quotaFlushLockKey, quotaDirtySetKey, quotaFlushingSetKey}
+	n, err := recoverScript.Run(ctx, client, scriptKeys, token).Int()
+	if err != nil {
+		log.Errorf("failed to recover the quota keys left by the previous flush, error: %v", err)
+		return
+	}
+	if n > 0 {
+		log.Infof("recovered %d quota keys left by the previous flush", n)
+	}
+
 	// keys marked dirty again during this round are left for the next round
 	pending, err := client.SCard(ctx, quotaDirtySetKey).Result()
 	if err != nil {
@@ -156,9 +213,10 @@ func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, lost *at
 	}
 
 	for pending > 0 && !lost.Load() {
-		keys, err := client.SPopN(ctx, quotaDirtySetKey, min(pending, quotaFlushBatchSize)).Result()
+		keys, err := claimScript.Run(ctx, client, scriptKeys, token, min(pending, f.batchSize)).StringSlice()
 		if err != nil {
-			log.Errorf("failed to pop keys from the quota dirty set, error: %v", err)
+			// the keys claimed despite the error are recovered in the next round
+			log.Errorf("failed to claim keys from the quota dirty set, error: %v", err)
 			return
 		}
 		if len(keys) == 0 {
@@ -166,13 +224,11 @@ func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, lost *at
 		}
 		pending -= int64(len(keys))
 
-		var retries []any
+		var retries []string
 		for i, key := range keys {
 			if lost.Load() {
 				// the lock is lost, give the remaining keys back for the next holder
-				for _, k := range keys[i:] {
-					retries = append(retries, k)
-				}
+				retries = append(retries, keys[i:]...)
 				break
 			}
 			if err := f.flushKey(ctx, client, key); err != nil {
@@ -182,10 +238,18 @@ func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, lost *at
 				continue
 			}
 			flushed++
+			// a failed ack leaves the key in the flushing set, it is flushed again in the next round
+			res, err := ackScript.Run(context.WithoutCancel(ctx), client, scriptKeys, token, key).Int()
+			if err != nil {
+				log.Errorf("failed to remove quota %s from the flushing set, error: %v", key, err)
+			} else if res < 0 {
+				log.Warningf("lost the quota flush lock while flushing quota %s, stop flushing", key)
+				lost.Store(true)
+			}
 		}
 
 		if len(retries) > 0 {
-			if err := client.SAdd(context.WithoutCancel(ctx), quotaDirtySetKey, retries...).Err(); err != nil {
+			if err := requeue(context.WithoutCancel(ctx), client, retries); err != nil {
 				log.Errorf("failed to put %d keys back to the quota dirty set, error: %v", len(retries), err)
 			}
 		}
@@ -194,7 +258,24 @@ func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, lost *at
 	return
 }
 
+// requeue moves the keys from the flushing set back to the dirty set
+func requeue(ctx context.Context, client *redis.Client, keys []string) error {
+	members := make([]any, 0, len(keys))
+	for _, k := range keys {
+		members = append(members, k)
+	}
+	_, err := client.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		p.SAdd(ctx, quotaDirtySetKey, members...)
+		p.SRem(ctx, quotaFlushingSetKey, members...)
+		return nil
+	})
+	return err
+}
+
 func (f *quotaFlusher) flushKey(ctx context.Context, client *redis.Client, key string) error {
+	ctx, cancel := context.WithTimeout(ctx, f.keyTimeout)
+	defer cancel()
+
 	data, err := client.Get(ctx, key).Bytes()
 	if err != nil {
 		if errors.Is(err, redis.Nil) {
@@ -252,40 +333,48 @@ func (f *quotaFlusher) keepLock(ctx context.Context, client *redis.Client, token
 	return lost
 }
 
-// sweepLegacyKeys marks all the quota keys in redis as dirty once per process.
-// The previous versions did not track dirty keys, so the quotas they updated right
-// before being replaced in a rolling upgrade would otherwise never be flushed.
+// sweepLegacyKeys marks all the quota keys in redis as dirty every legacySweepInterval until
+// legacySweepEnd. The previous versions did not track dirty keys, so the quotas they updated
+// during a rolling upgrade would otherwise never be flushed. A failed sweep is retried on the next call.
 func (f *quotaFlusher) sweepLegacyKeys(ctx context.Context, client *redis.Client) {
-	if f.legacySwept || time.Now().Before(f.legacySweepAt) {
+	now := time.Now()
+	if now.Before(f.nextLegacySweep) || f.nextLegacySweep.After(f.legacySweepEnd) {
 		return
 	}
-	f.legacySwept = true
 
-	var keys []any
 	total := 0
-	addKeys := func() {
+	keys := make([]any, 0, 1000)
+	addKeys := func() error {
 		if len(keys) == 0 {
-			return
+			return nil
 		}
 		if err := client.SAdd(ctx, quotaDirtySetKey, keys...).Err(); err != nil {
-			log.Errorf("failed to add legacy quota keys to the dirty set, error: %v", err)
+			return err
 		}
 		total += len(keys)
 		keys = keys[:0]
+		return nil
 	}
 
+	var err error
 	iter := client.Scan(ctx, 0, quotaKeyPrefix+"*", 1000).Iterator()
-	for iter.Next(ctx) {
-		keys = append(keys, iter.Val())
-		if len(keys) >= 1000 {
-			addKeys()
+	for err == nil && iter.Next(ctx) {
+		if keys = append(keys, iter.Val()); len(keys) >= 1000 {
+			err = addKeys()
 		}
 	}
-	addKeys()
-	if err := iter.Err(); err != nil {
-		log.Errorf("failed to scan the legacy quota keys, error: %v", err)
+	if err == nil {
+		err = iter.Err()
+	}
+	if err == nil {
+		err = addKeys()
+	}
+	if err != nil {
+		log.Errorf("failed to mark the legacy quota keys as dirty, will retry, error: %v", err)
+		return
 	}
 
+	f.nextLegacySweep = now.Add(legacySweepInterval)
 	if total > 0 {
 		log.Infof("marked %d legacy quota keys as dirty", total)
 	}
