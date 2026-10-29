@@ -73,6 +73,7 @@ func (w *cookieWriter) Flush() {
 }
 
 func (w *cookieWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	w.dropUnusedCookies()
 	return http.NewResponseController(w.ResponseWriter).Hijack()
 }
 
