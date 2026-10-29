@@ -1,12 +1,7 @@
 name: Images
 
-# Builds the Harbor images whose Go code this fork patches and pushes them to
-# ghcr.io/<owner>/<image>. Everything else (portal, db, redis/valkey, nginx,
-# registry, registryctl, trivy-adapter) keeps using the upstream images.
-#
-# The images are produced from the upstream make/photon/<component>/Dockerfile
-# on top of the upstream goharbor/harbor-<component>-base image, so they are
-# drop-in replacements for the goharbor/* images used by the Helm chart.
+# Builds the images of the components this fork patches from the upstream
+# make/photon/<component>/Dockerfile and pushes them to ghcr.io/<owner>/<image>.
 
 on:
   push:
@@ -18,11 +13,11 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Git ref (branch, tag or SHA) to build. Empty = the ref selected above.'
+        description: 'Git ref (branch, tag or SHA) to build, default is the selected ref'
         required: false
         default: ''
       base_image_tag:
-        description: 'Tag of the upstream goharbor/harbor-*-base images. Empty = VERSION file if published upstream, else "dev".'
+        description: 'Tag of the upstream goharbor/harbor-*-base images, default is VERSION if published, else "dev"'
         required: false
         default: ''
 
@@ -49,7 +44,7 @@ jobs:
           - image: harbor-jobservice
             component: jobservice
             make_targets: compile_jobservice
-          # The exporter Dockerfile compiles the binary itself.
+          # the exporter Dockerfile compiles the binary itself
           - image: harbor-exporter
             component: exporter
             make_targets: ''
@@ -77,14 +72,13 @@ jobs:
 
           tags="$image:$sha"
           version_tag="$sha"
-          # A raw SHA passed as the dispatch ref is already covered by the sha tag.
+          # a raw SHA ref is already covered by the sha tag
           if ! echo "$ref_name" | grep -Eq '^[0-9a-f]{7,40}$'; then
             tags="$tags,$image:$ref_tag"
             version_tag="$ref_tag"
           fi
 
-          # Upstream publishes goharbor/harbor-<component>-base:<VERSION> for release
-          # branches and :dev for main. Use the VERSION tag when it exists.
+          # upstream publishes the base image as :<VERSION> for release branches and :dev for main
           base_ns=goharbor
           base_repo="$base_ns/harbor-${{ matrix.component }}-base"
           if [ -n "$INPUT_BASE_TAG" ]; then
@@ -115,15 +109,12 @@ jobs:
             echo "- tags: \`${tags//,/\`, \`}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      # Same compile path as upstream `make compile`: swagger codegen, then
-      # `go build` inside the pinned golang image with the release ldflags.
-      # -o lint_apis skips the swagger spec lint (needs a node toolchain image).
+      # -o lint_apis skips the swagger spec lint, which needs a node toolchain image
       - name: Compile binaries
         if: matrix.make_targets != ''
         run: make -o lint_apis ${{ matrix.make_targets }} ARCH=amd64 VERSIONTAG=${{ steps.meta.outputs.version_tag }}
 
-      # GitHub-hosted runners ship Docker, so only Buildx is set up here (see
-      # upstream d822d80c2: installing a different Docker broke Buildx).
+      # only Buildx, installing a different Docker breaks it (see upstream d822d80c2)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
