@@ -30,6 +30,7 @@ func RegisterCollectors() {
 		TotalProxyUpstreamReq,
 		QuotaFlushDurSummary,
 		QuotaFlushKeysTotal,
+		SessionCreatedTotal,
 	}...)
 }
 
@@ -105,4 +106,14 @@ var (
 			Help:      "The total number of quotas processed when flushing the quota usage from redis to db",
 		},
 		[]string{"result"})
+
+	// SessionCreatedTotal used to collect the total number of sessions persisted to the session storage
+	SessionCreatedTotal = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: os.Getenv(NamespaceEnvKey),
+			Subsystem: os.Getenv(SubsystemEnvKey),
+			Name:      "session_created_total",
+			Help:      "The total number of sessions created in the session storage",
+		},
+	)
 )

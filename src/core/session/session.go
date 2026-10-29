@@ -29,6 +29,7 @@ import (
 	"github.com/goharbor/harbor/src/lib/cache/redis"
 	"github.com/goharbor/harbor/src/lib/config"
 	"github.com/goharbor/harbor/src/lib/log"
+	"github.com/goharbor/harbor/src/lib/metric"
 )
 
 const (
@@ -45,6 +46,8 @@ type Store struct {
 	lock        sync.RWMutex
 	values      map[any]any
 	maxlifetime int64
+	// persisted indicates whether the session already exists in the backend storage
+	persisted bool
 }
 
 // Set value in redis session
@@ -89,7 +92,17 @@ func (rs *Store) SessionID(_ context.Context) string {
 func (rs *Store) releaseSession(ctx context.Context, _ http.ResponseWriter, requirePresent bool) {
 	rs.lock.RLock()
 	values := rs.values
+	persisted := rs.persisted
 	rs.lock.RUnlock()
+
+	// Do not persist a session which was newly created for this request and holds no data.
+	// Beego starts a session for every request it serves, so storing these empty sessions would
+	// create a key for every request without a session cookie, e.g. the requests sent by
+	// docker/containerd clients with basic auth, robot accounts or bearer tokens.
+	if !persisted && len(values) == 0 {
+		return
+	}
+
 	b, err := session.EncodeGob(values)
 	if err != nil {
 		return
@@ -102,7 +115,8 @@ func (rs *Store) releaseSession(ctx context.Context, _ http.ResponseWriter, requ
 	// the existing TTL in Redis (KeepTTL). This prevents background polling
 	// requests from keeping the session alive indefinitely.
 	exp := time.Duration(systemSessionTimeout(ctx, rs.maxlifetime))
-	if lib.GetSkipSessionRenewal(ctx) {
+	// A new session has no TTL to keep, always set the expiration for it.
+	if persisted && lib.GetSkipSessionRenewal(ctx) {
 		exp = goredis.KeepTTL
 	}
 
@@ -110,12 +124,19 @@ func (rs *Store) releaseSession(ctx context.Context, _ http.ResponseWriter, requ
 		if requirePresent {
 			cmd := rdb.Client.SetXX(ctx, rs.sid, string(b), exp)
 			if cmd.Err() != nil {
-				log.Debugf("release session error: %v", err)
+				log.Debugf("release session error: %v", cmd.Err())
 			}
 		} else {
 			cmd := rdb.Client.Set(ctx, rs.sid, string(b), exp)
 			if cmd.Err() != nil {
-				log.Debugf("release session error: %v", err)
+				log.Debugf("release session error: %v", cmd.Err())
+				return
+			}
+			if !persisted {
+				metric.SessionCreatedTotal.Inc()
+				rs.lock.Lock()
+				rs.persisted = true
+				rs.lock.Unlock()
 			}
 		}
 	}
@@ -163,7 +184,7 @@ func (rp *Provider) SessionRead(ctx context.Context, sid string) (session.Store,
 		return nil, err
 	}
 
-	rs := &Store{c: rp.c, sid: sid, values: kv, maxlifetime: rp.maxlifetime}
+	rs := &Store{c: rp.c, sid: sid, values: kv, maxlifetime: rp.maxlifetime, persisted: err == nil}
 	return rs, nil
 }
 
@@ -181,12 +202,9 @@ func (rp *Provider) SessionRegenerate(ctx context.Context, oldsid, sid string) (
 		ctx = context.TODO()
 	}
 	maxlifetime := time.Duration(systemSessionTimeout(ctx, rp.maxlifetime))
-	if isExist, _ := rp.SessionExist(ctx, oldsid); !isExist {
-		err := rp.c.Save(ctx, sid, map[any]any{}, maxlifetime)
-		if err != nil {
-			log.Debugf("failed to save sid=%s, where oldsid=%s, error: %s", sid, oldsid, err)
-		}
-	} else {
+	// when the old session doesn't exist, the new session is persisted lazily
+	// when it's released with data, see Store.releaseSession
+	if isExist, _ := rp.SessionExist(ctx, oldsid); isExist {
 		if rdb, ok := rp.c.(*redis.Cache); ok {
 			// redis has rename command
 			rdb.Rename(ctx, oldsid, sid)
