@@ -16,6 +16,7 @@ package dao
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"strings"
 	"sync"
@@ -199,4 +200,29 @@ func (suite *DaoTestSuite) TestCreateArtifactAndBlobConcurrentDelete() {
 		suite.Require().NoError(err)
 		suite.NotZero(id)
 	})
+}
+
+func (suite *DaoTestSuite) TestAssociateBlobsWithProjectManyBlobs() {
+	ctx := suite.Context()
+	projectID := int64(1)
+
+	// more rows than fit in the 65535 bind parameters of a single statement
+	const count = 22000
+	prefix := suite.RandString(8, "0123456789abcdef")
+	suite.ExecSQL(`INSERT INTO blob (digest, content_type, size)
+SELECT 'sha256:' || ? || lpad(to_hex(x), 56, '0'), 'application/octet-stream', 1 FROM generate_series(1, ?) x`, prefix, count)
+
+	digests := make([]string, count)
+	for i := range digests {
+		digests[i] = fmt.Sprintf("sha256:%s%056x", prefix, i+1)
+	}
+
+	suite.Require().NoError(suite.dao.AssociateBlobsWithProject(ctx, projectID, digests))
+
+	var associated int
+	o, err := orm.FromContext(ctx)
+	suite.Require().NoError(err)
+	suite.Require().NoError(o.Raw(`SELECT count(*) FROM project_blob pb JOIN blob b ON b.id = pb.blob_id
+WHERE pb.project_id = ? AND b.digest LIKE ?`, projectID, "sha256:"+prefix+"%").QueryRow(&associated))
+	suite.Equal(count, associated)
 }

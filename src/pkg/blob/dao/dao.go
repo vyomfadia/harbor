@@ -15,8 +15,10 @@
 package dao
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -97,6 +99,9 @@ func New() DAO {
 }
 
 type dao struct{}
+
+// associateBatchSize bounds the statements of AssociateBlobsWithProject below the 65535 bind parameters limit
+const associateBatchSize = 1000
 
 func (d *dao) CreateArtifactAndBlob(ctx context.Context, artifactDigest, blobDigest string) (int64, error) {
 	o, err := orm.FromContext(ctx)
@@ -403,12 +408,14 @@ func (d *dao) AssociateBlobsWithProject(ctx context.Context, projectID int64, bl
 		return err
 	}
 
-	// insert the rows sorted by blob id: inserting a row that another in-progress transaction
-	// is inserting waits for it, so concurrent transactions must use the same order to avoid deadlocks
 	var blobs []*models.Blob
-	sql := fmt.Sprintf(`SELECT id, digest FROM blob WHERE digest IN (%s) ORDER BY id`, orm.ParamPlaceholderForIn(len(digests)))
-	if _, err := o.Raw(sql, digests...).QueryRows(&blobs); err != nil {
-		return err
+	for chunk := range slices.Chunk(digests, associateBatchSize) {
+		var found []*models.Blob
+		sql := fmt.Sprintf(`SELECT id, digest FROM blob WHERE digest IN (%s)`, orm.ParamPlaceholderForIn(len(chunk)))
+		if _, err := o.Raw(sql, chunk...).QueryRows(&found); err != nil {
+			return err
+		}
+		blobs = append(blobs, found...)
 	}
 
 	if len(blobs) != len(digests) {
@@ -423,18 +430,27 @@ func (d *dao) AssociateBlobsWithProject(ctx context.Context, projectID int64, bl
 		}
 	}
 
+	// insert the rows sorted by blob id across all chunks: inserting a row that another in-progress
+	// transaction is inserting waits for it, so concurrent transactions must use the same order to avoid deadlocks
+	slices.SortFunc(blobs, func(a, b *models.Blob) int { return cmp.Compare(a.ID, b.ID) })
+
 	// see CreateProjectBlob for why DO NOTHING is used
 	now := time.Now()
-	values := make([]string, 0, len(blobs))
-	params := make([]any, 0, len(blobs)*3)
-	for _, blob := range blobs {
-		values = append(values, "(?, ?, ?)")
-		params = append(params, projectID, blob.ID, now)
-	}
-	sql = fmt.Sprintf(`INSERT INTO project_blob (project_id, blob_id, creation_time) VALUES %s
+	for chunk := range slices.Chunk(blobs, associateBatchSize) {
+		values := make([]string, 0, len(chunk))
+		params := make([]any, 0, len(chunk)*3)
+		for _, blob := range chunk {
+			values = append(values, "(?, ?, ?)")
+			params = append(params, projectID, blob.ID, now)
+		}
+		sql := fmt.Sprintf(`INSERT INTO project_blob (project_id, blob_id, creation_time) VALUES %s
 ON CONFLICT (project_id, blob_id) DO NOTHING`, strings.Join(values, ", "))
-	_, err = o.Raw(sql, params...).Exec()
-	return err
+		if _, err := o.Raw(sql, params...).Exec(); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (d *dao) ExistProjectBlob(ctx context.Context, projectID int64, blobDigest string) (bool, error) {
