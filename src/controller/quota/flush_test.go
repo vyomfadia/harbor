@@ -335,8 +335,12 @@ func (s *FlushTestSuite) TestQuotaFlushInterval() {
 
 	s.Equal(defaultQuotaFlushInterval, quotaFlushInterval())
 
+	mgr.Set(s.ctx, common.QuotaFlushIntervalSeconds, "60")
+	s.Equal(60*time.Second, quotaFlushInterval())
+
+	// capped so that the quotas are flushed before they expire in redis
 	mgr.Set(s.ctx, common.QuotaFlushIntervalSeconds, "600")
-	s.Equal(600*time.Second, quotaFlushInterval())
+	s.Equal(maxQuotaFlushInterval, quotaFlushInterval())
 
 	mgr.Set(s.ctx, common.QuotaFlushIntervalSeconds, 0)
 	s.Equal(defaultQuotaFlushInterval, quotaFlushInterval())

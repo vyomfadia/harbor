@@ -47,6 +47,9 @@ const (
 	quotaFlushBatchSize = 100
 	// defaultQuotaFlushInterval is the default interval for flushing the quotas.
 	defaultQuotaFlushInterval = 30 * time.Second
+	// maxQuotaFlushInterval is the max interval for flushing the quotas, the quotas must
+	// be flushed before they expire in redis, it is half of quotaExpireTimeout.
+	maxQuotaFlushInterval = 150 * time.Second
 )
 
 var (
@@ -72,7 +75,13 @@ func quotaFlushInterval() time.Duration {
 		return defaultQuotaFlushInterval
 	}
 
-	return time.Duration(seconds) * time.Second
+	interval := time.Duration(seconds) * time.Second
+	if interval > maxQuotaFlushInterval {
+		log.Warningf("quota flush interval %s exceeds the max value, use the max value %s", interval, maxQuotaFlushInterval)
+		return maxQuotaFlushInterval
+	}
+
+	return interval
 }
 
 // quotaFlusher flushes the quotas updated in redis to db.
@@ -94,8 +103,9 @@ func newQuotaFlusher() *quotaFlusher {
 		},
 		lockTTL: quotaFlushLockTTL,
 		// run the sweep after the instances of the previous version are expected to be gone
-		// during a rolling upgrade, and before the quota keys written by them expire.
-		legacySweepAt: time.Now().Add(quotaExpireTimeout / 2),
+		// during a rolling upgrade, and before the quota keys written by them expire, the
+		// delay plus maxQuotaFlushInterval is less than quotaExpireTimeout.
+		legacySweepAt: time.Now().Add(2 * time.Minute),
 	}
 }
 
