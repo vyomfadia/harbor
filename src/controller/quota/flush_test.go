@@ -80,7 +80,6 @@ func (s *FlushTestSuite) newFlusher(update func(ctx context.Context, q *quota.Qu
 	}
 }
 
-// record is a fake update function which records the latest flushed storage usage of each quota.
 func (s *FlushTestSuite) record(_ context.Context, q *quota.Quota) error {
 	used, err := q.GetUsed()
 	if err != nil {
@@ -99,7 +98,6 @@ func (s *FlushTestSuite) flushed(referenceID string) (int64, bool) {
 	return v, ok
 }
 
-// setQuota saves the quota to redis, when dirty is true also marks it as dirty like updateUsageByRedis does.
 func (s *FlushTestSuite) setQuota(referenceID string, used int64, dirty bool) string {
 	key := fmt.Sprintf("%smock:%s", quotaKeyPrefix, referenceID)
 	q := &quota.Quota{Reference: "mock", ReferenceID: referenceID}
@@ -174,7 +172,6 @@ func (s *FlushTestSuite) TestFlushDrainsDirtyKeys() {
 	_, ok := s.flushed(clean)
 	s.False(ok)
 	s.Empty(s.dirtyKeys())
-	// the lock is released after flushing
 	s.Zero(s.client.Exists(s.ctx, quotaFlushLockKey).Val())
 }
 

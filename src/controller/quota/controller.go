@@ -292,7 +292,7 @@ func (c *controller) updateUsageByRedis(ctx context.Context, reference, referenc
 		}
 
 		_, err = tx.TxPipelined(ctx, func(p redis.Pipeliner) error {
-			// mark the quota as dirty in the same transaction, so it will be flushed to db
+			// mark it dirty in the same transaction so it is flushed to db
 			p.Set(ctx, key, val, quotaExpireTimeout)
 			p.SAdd(ctx, quotaDirtySetKey, key)
 			return nil
@@ -417,7 +417,6 @@ func (c *controller) Update(ctx context.Context, u *quota.Quota) error {
 		q, err := c.quotaMgr.GetByRef(ctx, u.Reference, u.ReferenceID)
 		if err != nil {
 			if errors.IsNotFoundErr(err) {
-				// no need to retry if the quota does not exist
 				return retry.Abort(err)
 			}
 			return err

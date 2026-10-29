@@ -32,34 +32,29 @@ import (
 )
 
 const (
-	// quotaKeyPrefix is the prefix of the keys holding the quotas updated in redis,
-	// the "cache:" prefix keeps them consistent with the keys saved by cache.Default().
+	// quotaKeyPrefix matches the prefix of the keys saved by cache.Default()
 	quotaKeyPrefix = "cache:quota:"
-	// quotaDirtySetKey is the redis set holding the keys of the quotas which have been
-	// updated in redis but not flushed to db yet. Its name must not match the
-	// "cache:*quota:*" pattern scanned by the previous versions.
+	// quotaDirtySetKey holds the keys of the quotas updated in redis but not flushed to db yet.
+	// It must not match the "cache:*quota:*" pattern scanned by the previous versions.
 	quotaDirtySetKey = "quota:dirty"
-	// quotaFlushLockKey is the key of the lock which ensures only one instance flushes at a time.
+	// quotaFlushLockKey is the lock ensuring only one instance flushes at a time
 	quotaFlushLockKey = "quota:flush_lock"
-	// quotaFlushLockTTL is the ttl of the flush lock, the lock is extended periodically while flushing.
+	// quotaFlushLockTTL is extended periodically while flushing
 	quotaFlushLockTTL = time.Minute
-	// quotaFlushBatchSize is the max number of keys popped from the dirty set at a time.
 	quotaFlushBatchSize = 100
-	// defaultQuotaFlushInterval is the default interval for flushing the quotas.
 	defaultQuotaFlushInterval = 30 * time.Second
-	// maxQuotaFlushInterval is the max interval for flushing the quotas, the quotas must
-	// be flushed before they expire in redis, it is half of quotaExpireTimeout.
+	// maxQuotaFlushInterval is half of quotaExpireTimeout, quotas must be flushed before they expire
 	maxQuotaFlushInterval = 150 * time.Second
 )
 
 var (
-	// releaseLockScript deletes the lock only when it is still held by the given token.
+	// releaseLockScript deletes the lock only if it is still held by the token
 	releaseLockScript = redis.NewScript(`
 if redis.call("GET", KEYS[1]) == ARGV[1] then
 	return redis.call("DEL", KEYS[1])
 end
 return 0`)
-	// extendLockScript extends the ttl of the lock only when it is still held by the given token.
+	// extendLockScript extends the lock only if it is still held by the token
 	extendLockScript = redis.NewScript(`
 if redis.call("GET", KEYS[1]) == ARGV[1] then
 	return redis.call("PEXPIRE", KEYS[1], ARGV[2])
@@ -67,7 +62,7 @@ end
 return 0`)
 )
 
-// quotaFlushInterval returns the interval for flushing the quotas from redis to db.
+// quotaFlushInterval returns the configured flush interval, bounded by maxQuotaFlushInterval.
 func quotaFlushInterval() time.Duration {
 	seconds := config.GetQuotaFlushIntervalSeconds()
 	if seconds <= 0 {
@@ -84,13 +79,13 @@ func quotaFlushInterval() time.Duration {
 	return interval
 }
 
-// quotaFlusher flushes the quotas updated in redis to db.
+// quotaFlusher flushes the quotas updated in redis to db
 type quotaFlusher struct {
 	getClient func() (*redis.Client, error)
 	update    func(ctx context.Context, q *quota.Quota) error
 	lockTTL   time.Duration
 
-	// legacySweepAt is the time after which the one-off sweep of the legacy quota keys runs.
+	// legacySweepAt is when the one-off sweep of the legacy quota keys runs
 	legacySweepAt time.Time
 	legacySwept   bool
 }
@@ -102,15 +97,13 @@ func newQuotaFlusher() *quotaFlusher {
 			return Ctl.Update(ctx, q)
 		},
 		lockTTL: quotaFlushLockTTL,
-		// run the sweep after the instances of the previous version are expected to be gone
-		// during a rolling upgrade, and before the quota keys written by them expire, the
-		// delay plus maxQuotaFlushInterval is less than quotaExpireTimeout.
+		// sweep after the previous version's instances are gone in a rolling upgrade but before
+		// their quota keys expire: delay + maxQuotaFlushInterval < quotaExpireTimeout
 		legacySweepAt: time.Now().Add(2 * time.Minute),
 	}
 }
 
-// flush flushes the quotas recorded in the dirty set to db. Only the instance which
-// holds the flush lock does the work, the others return immediately.
+// flush flushes the quotas in the dirty set to db, only the instance holding the flush lock does the work
 func (f *quotaFlusher) flush(ctx context.Context) {
 	client, err := f.getClient()
 	if err != nil {
@@ -150,15 +143,12 @@ func (f *quotaFlusher) flush(ctx context.Context) {
 	}
 }
 
-// drain pops the keys from the dirty set and flushes them to db. The keys which fail
-// to be flushed are put back to the dirty set to be retried in the next round.
+// drain pops the keys from the dirty set and flushes them, failed keys are put back for the next round.
 //
-// A key is removed from the dirty set before its value is read, so an update which
-// happens during the flush always marks the key dirty again and the key is flushed
-// again in the next round, no update is lost.
+// A key is removed from the dirty set before its value is read, so an update during
+// the flush marks it dirty again and no update is lost.
 func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, lost *atomic.Bool) (flushed, failed int) {
-	// only handle the keys which are dirty when the round starts, the keys marked
-	// dirty again during this round are handled in the next round.
+	// keys marked dirty again during this round are left for the next round
 	pending, err := client.SCard(ctx, quotaDirtySetKey).Result()
 	if err != nil {
 		log.Errorf("failed to get the size of the quota dirty set, error: %v", err)
@@ -204,7 +194,6 @@ func (f *quotaFlusher) drain(ctx context.Context, client *redis.Client, lost *at
 	return
 }
 
-// flushKey flushes the quota stored in the key to db.
 func (f *quotaFlusher) flushKey(ctx context.Context, client *redis.Client, key string) error {
 	data, err := client.Get(ctx, key).Bytes()
 	if err != nil {
@@ -236,8 +225,7 @@ func (f *quotaFlusher) flushKey(ctx context.Context, client *redis.Client, key s
 	return nil
 }
 
-// keepLock extends the flush lock periodically until ctx is done, the returned flag
-// is set once the lock can not be extended, which means it may be held by others.
+// keepLock extends the flush lock until ctx is done, the returned flag is set once the lock is lost
 func (f *quotaFlusher) keepLock(ctx context.Context, client *redis.Client, token string) *atomic.Bool {
 	lost := &atomic.Bool{}
 	go func() {
@@ -265,9 +253,8 @@ func (f *quotaFlusher) keepLock(ctx context.Context, client *redis.Client, token
 }
 
 // sweepLegacyKeys marks all the quota keys in redis as dirty once per process.
-// The previous versions flushed the quotas by scanning the whole keyspace and did
-// not track the dirty keys, so the quotas they updated right before they were
-// replaced in a rolling upgrade would not be flushed without this sweep.
+// The previous versions did not track dirty keys, so the quotas they updated right
+// before being replaced in a rolling upgrade would otherwise never be flushed.
 func (f *quotaFlusher) sweepLegacyKeys(ctx context.Context, client *redis.Client) {
 	if f.legacySwept || time.Now().Before(f.legacySweepAt) {
 		return

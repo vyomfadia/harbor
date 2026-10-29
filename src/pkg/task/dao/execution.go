@@ -56,12 +56,10 @@ var (
 	ExecDAO                               = NewExecutionDAO()
 	executionStatusChangePostFuncRegistry = map[string]ExecutionStatusChangePostFunc{}
 
-	// legacyExecStatusOutdateKeyRegex matches the keys used to mark the outdated executions
-	// by the previous versions, e.g. cache:execution:id:100:vendor:REPLICATION:status_outdate
+	// legacyExecStatusOutdateKeyRegex matches the keys of the previous versions,
+	// e.g. cache:execution:id:100:vendor:REPLICATION:status_outdate
 	legacyExecStatusOutdateKeyRegex = regexp.MustCompile(`^cache:execution:id:(\d+):vendor:([A-Za-z0-9_]+):status_outdate$`)
-	// legacyExecStatusOutdateMigrateAt is the time after which the legacy keys are migrated,
-	// it is delayed so that the instances of the previous version are expected to be gone
-	// when upgrading in a rolling way.
+	// the migration is delayed until the previous version's instances are gone in a rolling upgrade
 	legacyExecStatusOutdateMigrateAt = time.Now().Add(5 * time.Minute)
 	legacyExecStatusOutdateMigrated  atomic.Bool
 )
@@ -626,9 +624,8 @@ func scanAndRefreshOutdateStatus(ctx context.Context) {
 	}
 }
 
-// migrateLegacyOutdateKeys moves the outdated executions marked by the keys of the previous
-// versions into the set, so that they are still refreshed after upgrading. It scans the whole
-// keyspace, so it only runs once per process.
+// migrateLegacyOutdateKeys moves the legacy outdate keys into the set so they are still
+// refreshed after upgrading. It scans the whole keyspace, so it only runs once per process.
 func migrateLegacyOutdateKeys(ctx context.Context, client *redis.Client) {
 	var migrated int
 	iter := client.Scan(ctx, 0, "cache:execution:id:*:vendor:*:status_outdate", 1000).Iterator()
@@ -642,7 +639,7 @@ func migrateLegacyOutdateKeys(ctx context.Context, client *redis.Client) {
 		if err != nil {
 			continue
 		}
-		// add the member before deleting the key, so the execution is never dropped
+		// add before deleting so the execution is never dropped
 		if err := client.SAdd(ctx, execStatusOutdateSetKey, buildExecStatusOutdateMember(id, matches[2])).Err(); err != nil {
 			log.Errorf("failed to migrate the legacy outdate execution key %s, error: %v", key, err)
 			continue

@@ -86,7 +86,7 @@ var (
 		},
 		[]string{"project", "method"})
 
-	// QuotaFlushDurSummary used to collect the duration of flushing the quota usage from redis to db
+	// QuotaFlushDurSummary collects the duration of flushing the quota usage to db
 	QuotaFlushDurSummary = prometheus.NewSummary(
 		prometheus.SummaryOpts{
 			Namespace:  os.Getenv(NamespaceEnvKey),
@@ -96,7 +96,7 @@ var (
 			Objectives: map[float64]float64{0.5: 0.05, 0.9: 0.01, 0.99: 0.001},
 		})
 
-	// QuotaFlushKeysTotal used to collect the number of quotas processed when flushing the quota usage from redis to db
+	// QuotaFlushKeysTotal collects the number of quotas processed when flushing the quota usage
 	QuotaFlushKeysTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: os.Getenv(NamespaceEnvKey),

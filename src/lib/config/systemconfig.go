@@ -171,7 +171,7 @@ func GetQuotaUpdateProvider() string {
 	return DefaultMgr().Get(backgroundCtx, common.QuotaUpdateProvider).GetString()
 }
 
-// GetQuotaFlushIntervalSeconds returns the interval seconds for flushing the quota usage from redis to db.
+// GetQuotaFlushIntervalSeconds returns the interval seconds for flushing the quota usage to db
 func GetQuotaFlushIntervalSeconds() int64 {
 	return DefaultMgr().Get(backgroundCtx, common.QuotaFlushIntervalSeconds).GetInt64()
 }
