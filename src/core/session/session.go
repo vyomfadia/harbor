@@ -115,7 +115,8 @@ func (rs *Store) releaseSession(ctx context.Context, _ http.ResponseWriter, requ
 	exp := time.Duration(systemSessionTimeout(ctx, rs.maxlifetime))
 	// a new session has no TTL to keep
 	if persisted && lib.GetSkipSessionRenewal(ctx) {
-		exp = goredis.KeepTTL
+		// XX so that a key expired during the request isn't recreated without TTL
+		exp, requirePresent = goredis.KeepTTL, true
 	}
 
 	if rdb, ok := rs.c.(*redis.Cache); ok {

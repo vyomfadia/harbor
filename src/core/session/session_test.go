@@ -188,6 +188,24 @@ func (s *sessionTestSuite) TestReleaseNewSessionSkipRenewal() {
 	s.Greater(ttl, time.Duration(0))
 }
 
+func (s *sessionTestSuite) TestReleaseExpiredSessionSkipRenewal() {
+	ctx := context.Background()
+	defer s.provider.SessionDestroy(ctx, "session-008")
+
+	store, err := s.provider.SessionRead(ctx, "session-008")
+	s.NoError(err)
+	s.NoError(store.Set(ctx, "key", "value"))
+	store.SessionRelease(ctx, nil)
+
+	store, err = s.provider.SessionRead(ctx, "session-008")
+	s.NoError(err)
+	// the session expires while the request is being served
+	s.NoError(s.provider.SessionDestroy(ctx, "session-008"))
+	store.SessionRelease(lib.WithSkipSessionRenewal(ctx, true), nil)
+	exist, _ := s.provider.SessionExist(ctx, "session-008")
+	s.False(exist, "expired session should not be recreated")
+}
+
 func (s *sessionTestSuite) TestSessionGC() {
 	s.provider.SessionGC(context.Background())
 }
