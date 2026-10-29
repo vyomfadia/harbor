@@ -16,6 +16,7 @@ package backend
 
 import (
 	"os"
+	"strings"
 
 	"github.com/goharbor/harbor/src/lib/log"
 )
@@ -31,6 +32,8 @@ const (
 // It outputs the log to the stdout/stderr.
 type StdOutputLogger struct {
 	backendLogger *log.Logger
+	// prefix is prepended to every log message
+	prefix string
 }
 
 // NewStdOutputLogger creates a new std output logger
@@ -47,52 +50,71 @@ func NewStdOutputLogger(level string, output string, depth int) *StdOutputLogger
 	}
 }
 
+// WithKey returns a copy of the logger which prefixes every message with the key
+func (sl *StdOutputLogger) WithKey(key string) *StdOutputLogger {
+	return &StdOutputLogger{
+		backendLogger: sl.backendLogger,
+		prefix:        "[" + key + "] ",
+	}
+}
+
+func (sl *StdOutputLogger) args(v []any) []any {
+	if len(sl.prefix) == 0 {
+		return v
+	}
+	return append([]any{sl.prefix}, v...)
+}
+
+func (sl *StdOutputLogger) format(format string) string {
+	return strings.ReplaceAll(sl.prefix, "%", "%%") + format
+}
+
 // Debug ...
 func (sl *StdOutputLogger) Debug(v ...any) {
-	sl.backendLogger.Debug(v...)
+	sl.backendLogger.Debug(sl.args(v)...)
 }
 
 // Debugf with format
 func (sl *StdOutputLogger) Debugf(format string, v ...any) {
-	sl.backendLogger.Debugf(format, v...)
+	sl.backendLogger.Debugf(sl.format(format), v...)
 }
 
 // Info ...
 func (sl *StdOutputLogger) Info(v ...any) {
-	sl.backendLogger.Info(v...)
+	sl.backendLogger.Info(sl.args(v)...)
 }
 
 // Infof with format
 func (sl *StdOutputLogger) Infof(format string, v ...any) {
-	sl.backendLogger.Infof(format, v...)
+	sl.backendLogger.Infof(sl.format(format), v...)
 }
 
 // Warning ...
 func (sl *StdOutputLogger) Warning(v ...any) {
-	sl.backendLogger.Warning(v...)
+	sl.backendLogger.Warning(sl.args(v)...)
 }
 
 // Warningf with format
 func (sl *StdOutputLogger) Warningf(format string, v ...any) {
-	sl.backendLogger.Warningf(format, v...)
+	sl.backendLogger.Warningf(sl.format(format), v...)
 }
 
 // Error ...
 func (sl *StdOutputLogger) Error(v ...any) {
-	sl.backendLogger.Error(v...)
+	sl.backendLogger.Error(sl.args(v)...)
 }
 
 // Errorf with format
 func (sl *StdOutputLogger) Errorf(format string, v ...any) {
-	sl.backendLogger.Errorf(format, v...)
+	sl.backendLogger.Errorf(sl.format(format), v...)
 }
 
 // Fatal error
 func (sl *StdOutputLogger) Fatal(v ...any) {
-	sl.backendLogger.Fatal(v...)
+	sl.backendLogger.Fatal(sl.args(v)...)
 }
 
 // Fatalf error
 func (sl *StdOutputLogger) Fatalf(format string, v ...any) {
-	sl.backendLogger.Fatalf(format, v...)
+	sl.backendLogger.Fatalf(sl.format(format), v...)
 }

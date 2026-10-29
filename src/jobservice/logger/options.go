@@ -111,3 +111,15 @@ func (o *OptionItem) String() string {
 func (o *OptionItem) Raw() any {
 	return o.val
 }
+
+// optionString returns the string value of the option, or "" if not found
+func optionString(items []OptionItem, field string) string {
+	for _, item := range items {
+		if item.Field() == field {
+			if s, ok := item.Raw().(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}

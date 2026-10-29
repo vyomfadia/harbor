@@ -143,6 +143,7 @@ jobservice:
   # Maximum hours of task duration in job service, default 24
   max_job_duration_hours: 24
   # The jobLoggers backend name, only support "STD_OUTPUT", "FILE" and/or "DB"
+  # Job logs can only be viewed in the UI/API if "FILE" or "DB" is enabled
   job_loggers:
     - STD_OUTPUT
     - FILE
