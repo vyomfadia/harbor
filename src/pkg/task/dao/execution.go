@@ -17,8 +17,10 @@ package dao
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -53,6 +55,13 @@ var (
 	// ExecDAO is the global execution dao
 	ExecDAO                               = NewExecutionDAO()
 	executionStatusChangePostFuncRegistry = map[string]ExecutionStatusChangePostFunc{}
+
+	// legacyExecStatusOutdateKeyRegex matches the keys of the previous versions,
+	// e.g. cache:execution:id:100:vendor:REPLICATION:status_outdate
+	legacyExecStatusOutdateKeyRegex = regexp.MustCompile(`^cache:execution:id:(\d+):vendor:([A-Za-z0-9_]+):status_outdate$`)
+	// the migration is delayed until the previous version's instances are gone in a rolling upgrade
+	legacyExecStatusOutdateMigrateAt = time.Now().Add(5 * time.Minute)
+	legacyExecStatusOutdateMigrated  atomic.Bool
 )
 
 const (
@@ -553,6 +562,10 @@ func scanAndRefreshOutdateStatus(ctx context.Context) {
 		return
 	}
 
+	if time.Now().After(legacyExecStatusOutdateMigrateAt) && legacyExecStatusOutdateMigrated.CompareAndSwap(false, true) {
+		migrateLegacyOutdateKeys(ctx, client)
+	}
+
 	var succeed, failed int64
 	for {
 		members, err := client.SPopN(ctx, execStatusOutdateSetKey, int64(execStatusOutdateBatchSize)).Result()
@@ -608,6 +621,39 @@ func scanAndRefreshOutdateStatus(ctx context.Context) {
 
 	if succeed+failed > 0 {
 		log.Infof("refresh outdate execution status done, %d succeed, %d failed", succeed, failed)
+	}
+}
+
+// migrateLegacyOutdateKeys moves the legacy outdate keys into the set so they are still
+// refreshed after upgrading. It scans the whole keyspace, so it only runs once per process.
+func migrateLegacyOutdateKeys(ctx context.Context, client *redis.Client) {
+	var migrated int
+	iter := client.Scan(ctx, 0, "cache:execution:id:*:vendor:*:status_outdate", 1000).Iterator()
+	for iter.Next(ctx) {
+		key := iter.Val()
+		matches := legacyExecStatusOutdateKeyRegex.FindStringSubmatch(key)
+		if len(matches) != 3 {
+			continue
+		}
+		id, err := strconv.ParseInt(matches[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		// add before deleting so the execution is never dropped
+		if err := client.SAdd(ctx, execStatusOutdateSetKey, buildExecStatusOutdateMember(id, matches[2])).Err(); err != nil {
+			log.Errorf("failed to migrate the legacy outdate execution key %s, error: %v", key, err)
+			continue
+		}
+		if err := client.Del(ctx, key).Err(); err != nil {
+			log.Errorf("failed to delete the legacy outdate execution key %s, error: %v", key, err)
+		}
+		migrated++
+	}
+	if err := iter.Err(); err != nil {
+		log.Errorf("failed to scan the legacy outdate execution keys, error: %v", err)
+	}
+	if migrated > 0 {
+		log.Infof("migrated %d legacy outdate execution keys", migrated)
 	}
 }
 
