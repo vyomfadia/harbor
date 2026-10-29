@@ -24,6 +24,7 @@ import (
 	lib_http "github.com/goharbor/harbor/src/lib/http"
 	"github.com/goharbor/harbor/src/lib/log"
 	"github.com/goharbor/harbor/src/lib/orm"
+	"github.com/goharbor/harbor/src/pkg/notification"
 	"github.com/goharbor/harbor/src/server/middleware"
 )
 
@@ -85,6 +86,74 @@ func Middleware(skippers ...middleware.Skipper) func(http.Handler) http.Handler 
 				return
 			}
 			lib_http.SendError(res, err)
+		}
+	}, skippers...)
+}
+
+// failedResponse rolls back the transaction when the response of the handler is not success
+type failedResponse struct {
+	cause error // the error the response is rendered from, if known
+}
+
+func (e *failedResponse) Error() string { return errNonSuccess.Error() }
+
+func (e *failedResponse) Unwrap() error { return e.cause }
+
+// RetryableMiddleware is like Middleware, but runs the request again in a new transaction when
+// it is aborted by a deadlock or a serialization failure, see orm.RetryTransaction.
+//
+// The wrapped handlers may run several times, so they must only do repeatable work and be able
+// to re-read the request body. The response and notification events of an aborted attempt are
+// dropped. Use it at route level after the non-repeatable work (e.g. proxying to the registry).
+func RetryableMiddleware(opName string, skippers ...middleware.Skipper) func(http.Handler) http.Handler {
+	return middleware.New(func(w http.ResponseWriter, r *http.Request, next http.Handler) {
+		var (
+			res    *lib.ResponseBuffer
+			events *notification.EventCtx
+		)
+
+		attempt := func(ctx context.Context) error {
+			committed := new(bool) // default false, not must commit
+
+			cc := context.WithValue(ctx, orm.CommittedKey{}, committed)
+			next.ServeHTTP(res, r.WithContext(cc))
+
+			if !(*committed) && !res.Success() {
+				return &failedResponse{cause: res.Err()}
+			}
+
+			return nil
+		}
+
+		ctx := r.Context()
+		txCtx := log.WithLogger(orm.SetTransactionOpNameToContext(ctx, opName),
+			log.G(ctx).WithFields(log.Fields{"method": r.Method, "url": r.URL.Path}))
+		err := orm.RetryTransaction(txCtx, func() error {
+			res = lib.NewResponseBuffer(w)
+			events = notification.NewEventCtx()
+			return orm.WithTransaction(attempt)(notification.NewContext(txCtx, events))
+		})
+
+		if parent, ok := notification.FromContext(ctx); ok {
+			parent.Events.PushBackList(events.Events)
+			parent.MustNotify = parent.MustNotify || events.MustNotify
+		}
+
+		var failed *failedResponse
+		if err != nil && !errors.As(err, &failed) {
+			err = fmt.Errorf("deal with %s request in transaction failed: %w", r.URL.Path, err)
+
+			// begin, commit or rollback transaction db error happened,
+			// reset the response and set status code to 500
+			if err := res.Reset(); err != nil {
+				log.Errorf("reset the response failed: %v", err)
+				return
+			}
+			lib_http.SendError(res, err)
+		}
+
+		if _, err := res.Flush(); err != nil {
+			log.Errorf("flush the response failed: %v", err)
 		}
 	}, skippers...)
 }

@@ -271,9 +271,12 @@ func (c *controller) ensureArtifact(ctx context.Context, repository, digest stri
 
 // touchRepo bumps update_time on the parent repository so the "last modified"
 // timestamp reflects artifact create/delete events. Errors are logged only;
-// the caller's operation has already succeeded.
+// the caller's operation has already succeeded. The update runs in its own
+// (sub)transaction so a failure doesn't abort the caller's transaction.
 func (c *controller) touchRepo(ctx context.Context, repositoryID int64) {
-	if err := c.repoMgr.Touch(ctx, repositoryID); err != nil {
+	if err := orm.WithTransaction(func(ctx context.Context) error {
+		return c.repoMgr.Touch(ctx, repositoryID)
+	})(orm.SetTransactionOpNameToContext(ctx, "tx-touch-repository")); err != nil {
 		log.G(ctx).Warningf("failed to touch repository %d update_time: %v", repositoryID, err)
 	}
 }

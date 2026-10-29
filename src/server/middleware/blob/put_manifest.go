@@ -30,7 +30,12 @@ import (
 // and it creates Blobs for the foreign layers and associate them with the project, updates the content type of the Blobs which already exist,
 // create Blob for the manifest, associate all Blobs with the manifest after PUT /v2/<name>/manifests/<reference> success.
 func PutManifestMiddleware() func(http.Handler) http.Handler {
-	before := middleware.BeforeRequest(func(r *http.Request) error {
+	return middleware.Chain(PutManifestProbeMiddleware(), PutManifestSyncMiddleware())
+}
+
+// PutManifestProbeMiddleware is the part of PutManifestMiddleware which runs before the request is proxied.
+func PutManifestProbeMiddleware() func(http.Handler) http.Handler {
+	return middleware.BeforeRequest(func(r *http.Request) error {
 		ctx := r.Context()
 		logger := log.G(ctx)
 
@@ -51,8 +56,12 @@ func PutManifestMiddleware() func(http.Handler) http.Handler {
 
 		return probeBlob(r, descriptor.Digest.String())
 	})
+}
 
-	after := middleware.AfterResponse(func(_ http.ResponseWriter, r *http.Request, statusCode int) error {
+// PutManifestSyncMiddleware is the part of PutManifestMiddleware which runs after PUT /v2/<name>/manifests/<reference> success,
+// it only does database work so it can run in the transaction started after the request was proxied.
+func PutManifestSyncMiddleware() func(http.Handler) http.Handler {
+	return middleware.AfterResponse(func(_ http.ResponseWriter, r *http.Request, statusCode int) error {
 		if statusCode != http.StatusCreated {
 			return nil
 		}
@@ -117,6 +126,4 @@ func PutManifestMiddleware() func(http.Handler) http.Handler {
 
 		return nil
 	})
-
-	return middleware.Chain(before, after)
 }

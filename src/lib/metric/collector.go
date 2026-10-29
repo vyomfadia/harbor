@@ -28,6 +28,8 @@ func RegisterCollectors() {
 		TotalReqDurSummary,
 		TotalProxyReq,
 		TotalProxyUpstreamReq,
+		TotalDBDeadlockRetries,
+		TotalDBDeadlockGiveUps,
 	}...)
 }
 
@@ -83,4 +85,24 @@ var (
 			Help:      "The total number of proxy cache requests that fetched from the upstream registry (cache miss)",
 		},
 		[]string{"project", "method"})
+
+	// TotalDBDeadlockRetries collects the transactions re-run after a deadlock or serialization failure
+	TotalDBDeadlockRetries = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: os.Getenv(NamespaceEnvKey),
+			Subsystem: os.Getenv(SubsystemEnvKey),
+			Name:      "db_deadlock_retries_total",
+			Help:      "The total number of database transactions retried after being aborted by a deadlock or a serialization failure",
+		},
+		[]string{"operation", "sqlstate"})
+
+	// TotalDBDeadlockGiveUps collects the transactions still aborted on the last attempt
+	TotalDBDeadlockGiveUps = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: os.Getenv(NamespaceEnvKey),
+			Subsystem: os.Getenv(SubsystemEnvKey),
+			Name:      "db_deadlock_giveups_total",
+			Help:      "The total number of database transactions that failed with a deadlock or a serialization failure after all retries",
+		},
+		[]string{"operation", "sqlstate"})
 )

@@ -16,6 +16,7 @@ package registry
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -35,6 +36,7 @@ import (
 	"github.com/goharbor/harbor/src/lib/log"
 	"github.com/goharbor/harbor/src/pkg"
 	"github.com/goharbor/harbor/src/pkg/notification"
+	"github.com/goharbor/harbor/src/server/middleware"
 	"github.com/goharbor/harbor/src/server/router"
 )
 
@@ -172,44 +174,68 @@ func deleteManifest(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+type registryResponseKey struct{}
+
+// proxyManifest proxies PUT /v2/<name>/manifests/<reference> to the backend registry and calls
+// the next handler only when the registry accepted the manifest, with its response in the context.
+//
+// It is separated from putManifest so that the database work runs in a transaction started after
+// the registry returned: it holds no locks while waiting for the registry and can be retried.
+func proxyManifest() func(http.Handler) http.Handler {
+	return middleware.New(func(w http.ResponseWriter, req *http.Request, next http.Handler) {
+		reference := router.Param(req.Context(), ":reference")
+
+		// If reference is a tag (not a digest), replace it with the computed digest
+		// before proxying to the backend. This prevents tags from being stored in the
+		// backend registry storage, while Harbor maintains the tag-to-digest mapping in the database.
+		proxyReq := req
+		if _, err := digest.Parse(reference); err != nil {
+			// reference is a tag, not a digest; bound the buffered body so an
+			// over-limit manifest is rejected with 413 instead of buffered whole
+			data, err := lib.ReadRequestBody(req, common.MaxManifestBodySize)
+			if err != nil {
+				lib_http.SendError(w, err)
+				return
+			}
+
+			dgst := digest.FromBytes(data)
+			proxyReq = req.Clone(req.Context())
+			proxyReq.URL.Path = strings.TrimSuffix(proxyReq.URL.Path, reference) + dgst.String()
+			proxyReq.URL.RawPath = proxyReq.URL.EscapedPath()
+			proxyReq.Body = io.NopCloser(bytes.NewReader(data))
+			proxyReq.ContentLength = int64(len(data))
+		}
+
+		// proxy the req to the backend docker registry
+		buffer := lib.NewResponseBuffer(w)
+		proxy.ServeHTTP(buffer, proxyReq)
+		if !buffer.Success() {
+			if _, err := buffer.Flush(); err != nil {
+				log.Errorf("failed to flush: %v", err)
+			}
+			return
+		}
+
+		ctx := context.WithValue(req.Context(), registryResponseKey{}, buffer)
+		next.ServeHTTP(w, req.WithContext(ctx))
+	})
+}
+
+// putManifest records the manifest accepted by the registry, it must be wrapped by proxyManifest
 func putManifest(w http.ResponseWriter, req *http.Request) {
 	repo := router.Param(req.Context(), ":splat")
 	reference := router.Param(req.Context(), ":reference")
 
-	// make sure the repository exist before pushing the manifest
-	_, _, err := repository.Ctl.Ensure(req.Context(), repo)
-	if err != nil {
-		lib_http.SendError(w, err)
+	registryRes, ok := req.Context().Value(registryResponseKey{}).(*lib.ResponseBuffer)
+	if !ok {
+		lib_http.SendError(w, errors.New("the response of the registry for the manifest is not found"))
 		return
 	}
 
-	buffer := lib.NewResponseBuffer(w)
-
-	// proxy the req to the backend docker registry
-	// If reference is a tag (not a digest), replace it with the computed digest
-	// before proxying to the backend. This prevents tags from being stored in the
-	// backend registry storage, while Harbor maintains the tag-to-digest mapping in the database.
-	if _, err := digest.Parse(reference); err != nil {
-		// reference is a tag, not a digest; bound the buffered body so an
-		// over-limit manifest is rejected with 413 instead of buffered whole
-		data, err := lib.ReadRequestBody(req, common.MaxManifestBodySize)
-		if err != nil {
-			lib_http.SendError(w, err)
-			return
-		}
-
-		dgst := digest.FromBytes(data)
-		req = req.Clone(req.Context())
-		req.URL.Path = strings.TrimSuffix(req.URL.Path, reference) + dgst.String()
-		req.URL.RawPath = req.URL.EscapedPath()
-		req.Body = io.NopCloser(bytes.NewReader(data))
-		req.ContentLength = int64(len(data))
-	}
-	proxy.ServeHTTP(buffer, req)
-	if !buffer.Success() {
-		if _, err := buffer.Flush(); err != nil {
-			log.Errorf("failed to flush: %v", err)
-		}
+	// make sure the repository exist before recording the manifest
+	_, _, err := repository.Ctl.Ensure(req.Context(), repo)
+	if err != nil {
+		lib_http.SendError(w, err)
 		return
 	}
 
@@ -221,7 +247,7 @@ func putManifest(w http.ResponseWriter, req *http.Request) {
 	dgt := reference
 	// the reference is tag, get the digest from the response header
 	if _, err := digest.Parse(reference); err != nil {
-		dgt = buffer.Header().Get("Docker-Content-Digest")
+		dgt = registryRes.Header().Get("Docker-Content-Digest")
 		tags = append(tags, reference)
 	}
 
@@ -232,8 +258,14 @@ func putManifest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// flush the origin response from the docker registry to the underlying response writer
-	if _, err := buffer.Flush(); err != nil {
-		log.Errorf("failed to flush: %v", err)
+	// write the origin response from the docker registry
+	for k, vs := range registryRes.Header() {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(registryRes.StatusCode())
+	if _, err := w.Write(registryRes.Buffer()); err != nil {
+		log.Errorf("failed to write the response: %v", err)
 	}
 }

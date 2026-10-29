@@ -15,6 +15,7 @@
 package lib
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -88,6 +89,25 @@ func (r *responseBufferTestSuite) TestSuccess() {
 	r.buffer.wroteHeader = false
 	r.buffer.WriteHeader(http.StatusOK)
 	r.True(r.buffer.Success())
+}
+
+func (r *responseBufferTestSuite) TestRecordError() {
+	r.Nil(r.buffer.Err())
+
+	err := errors.New("error")
+	r.buffer.RecordError(err)
+	r.Equal(err, r.buffer.Err())
+
+	// the error is propagated to the underlying buffer when flushed
+	outer := NewResponseBuffer(r.recorder)
+	inner := NewResponseBuffer(outer)
+	inner.RecordError(err)
+	_, e := inner.Flush()
+	r.Require().Nil(e)
+	r.Equal(err, outer.Err())
+
+	r.Require().Nil(r.buffer.Reset())
+	r.Nil(r.buffer.Err())
 }
 
 func TestResponseBuffer(t *testing.T) {

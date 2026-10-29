@@ -16,16 +16,21 @@ package transaction
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	o "github.com/beego/beego/v2/client/orm"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 
+	"github.com/goharbor/harbor/src/controller/event/metadata"
 	"github.com/goharbor/harbor/src/lib/errors"
+	lib_http "github.com/goharbor/harbor/src/lib/http"
 	"github.com/goharbor/harbor/src/lib/orm"
+	"github.com/goharbor/harbor/src/pkg/notification"
 	"github.com/goharbor/harbor/src/server/middleware"
 )
 
@@ -178,4 +183,102 @@ func TestMustCommit(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRetryableMiddleware(t *testing.T) {
+	deadlock := &pgconn.PgError{Code: "40P01", Message: "deadlock detected"}
+
+	type result struct {
+		code   int
+		body   string
+		calls  int
+		events []string
+	}
+
+	// serve runs the handler which fails with the errors in order and then
+	// succeeds, every attempt inserts a record and adds a notification event
+	serve := func(mo *mockOrmer, errs ...error) result {
+		calls := 0
+		h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls++
+			o, err := orm.FromContext(r.Context())
+			assert.NoError(t, err)
+			_, _ = o.Insert(calls)
+			notification.AddEvent(r.Context(), &metadata.PushArtifactEventMetadata{Tag: fmt.Sprintf("attempt-%d", calls)})
+			if calls <= len(errs) {
+				lib_http.SendError(w, errs[calls-1])
+				return
+			}
+			w.WriteHeader(http.StatusCreated)
+			_, _ = w.Write([]byte(fmt.Sprintf("attempt-%d", calls)))
+		})
+
+		evc := notification.NewEventCtx()
+		req := httptest.NewRequest(http.MethodPut, "/v2/library/hello-world/manifests/latest", nil)
+		req = req.WithContext(notification.NewContext(orm.NewContext(req.Context(), mo), evc))
+		rec := httptest.NewRecorder()
+		RetryableMiddleware("tx-test")(h).ServeHTTP(rec, req)
+
+		res := result{code: rec.Code, body: rec.Body.String(), calls: calls}
+		for e := evc.Events.Front(); e != nil; e = e.Next() {
+			res.events = append(res.events, e.Value.(*metadata.PushArtifactEventMetadata).Tag)
+		}
+		return res
+	}
+
+	t.Run("success", func(t *testing.T) {
+		mo := &mockOrmer{}
+		res := serve(mo)
+		assert.Equal(t, http.StatusCreated, res.code)
+		assert.Equal(t, "attempt-1", res.body)
+		assert.Equal(t, 1, res.calls)
+		assert.Equal(t, []string{"attempt-1"}, res.events)
+		assert.Equal(t, []any{1}, mo.tx.records)
+	})
+
+	t.Run("retry on deadlock", func(t *testing.T) {
+		mo := &mockOrmer{}
+		res := serve(mo, errors.Wrap(deadlock, "associate blob with project failed"))
+		assert.Equal(t, http.StatusCreated, res.code)
+		// the response, the records and the events of the aborted attempt are dropped
+		assert.Equal(t, "attempt-2", res.body)
+		assert.Equal(t, 2, res.calls)
+		assert.Equal(t, []string{"attempt-2"}, res.events)
+		assert.Equal(t, []any{2}, mo.tx.records)
+	})
+
+	t.Run("no retry on other errors", func(t *testing.T) {
+		mo := &mockOrmer{}
+		res := serve(mo, errors.BadRequestError(nil).WithMessage("bad request"))
+		assert.Equal(t, http.StatusBadRequest, res.code)
+		assert.Contains(t, res.body, "bad request")
+		assert.Equal(t, 1, res.calls)
+		assert.Equal(t, []string{"attempt-1"}, res.events)
+		assert.Empty(t, mo.tx.records)
+	})
+
+	t.Run("give up", func(t *testing.T) {
+		mo := &mockOrmer{}
+		res := serve(mo, deadlock, deadlock, deadlock, deadlock, deadlock, deadlock, deadlock, deadlock)
+		assert.Equal(t, http.StatusInternalServerError, res.code)
+		assert.Less(t, res.calls, 8)
+		assert.Greater(t, res.calls, 1)
+		assert.Len(t, res.events, 1)
+		assert.Empty(t, mo.tx.records)
+	})
+
+	t.Run("commit failed", func(t *testing.T) {
+		mo := &mockOrmer{tx: mockTxOrmer{commitErr: errors.New("commit tx failed")}}
+		res := serve(mo)
+		assert.Equal(t, http.StatusInternalServerError, res.code)
+		assert.NotContains(t, res.body, "attempt-1")
+		assert.Equal(t, 1, res.calls)
+	})
+
+	t.Run("begin failed", func(t *testing.T) {
+		mo := &mockOrmer{beginErr: errors.New("begin tx failed")}
+		res := serve(mo)
+		assert.Equal(t, http.StatusInternalServerError, res.code)
+		assert.Equal(t, 0, res.calls)
+	})
 }
