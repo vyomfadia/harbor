@@ -39,6 +39,9 @@ type DAO interface {
 	Get(ctx context.Context, id int64) (tag *tag.Tag, err error)
 	// Create the tag
 	Create(ctx context.Context, tag *tag.Tag) (id int64, err error)
+	// Ensure creates the tag if no tag with the same name exists under the repository,
+	// and returns the ID of the created or existing one
+	Ensure(ctx context.Context, tag *tag.Tag) (created bool, id int64, err error)
 	// Update the tag. Only the properties specified by "props" will be updated if it is set
 	Update(ctx context.Context, tag *tag.Tag, props ...string) (err error)
 	// Delete the tag specified by ID
@@ -105,6 +108,25 @@ func (d *dao) Create(ctx context.Context, tag *tag.Tag) (int64, error) {
 	}
 	return id, err
 }
+
+func (d *dao) Ensure(ctx context.Context, tag *tag.Tag) (bool, int64, error) {
+	id, created, err := orm.InsertOrGetID(ctx,
+		`INSERT INTO tag (repository_id, artifact_id, name, push_time, pull_time)
+VALUES (?, ?, ?, ?::timestamptz, ?::timestamptz)
+ON CONFLICT (repository_id, name) DO NOTHING RETURNING id`,
+		[]any{tag.RepositoryID, tag.ArtifactID, tag.Name, orm.TimeArg(tag.PushTime), orm.TimeArg(tag.PullTime)},
+		`SELECT id FROM tag WHERE repository_id = ? AND name = ?`,
+		tag.RepositoryID, tag.Name)
+	if err != nil {
+		if e := orm.AsForeignKeyError(err, "the tag %s tries to attach to a non existing artifact %d",
+			tag.Name, tag.ArtifactID); e != nil {
+			err = e
+		}
+		return false, 0, err
+	}
+	return created, id, nil
+}
+
 func (d *dao) Update(ctx context.Context, tag *tag.Tag, props ...string) error {
 	ormer, err := orm.FromContext(ctx)
 	if err != nil {

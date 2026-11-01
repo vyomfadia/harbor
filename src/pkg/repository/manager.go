@@ -35,6 +35,9 @@ type Manager interface {
 	GetByName(ctx context.Context, name string) (repository *model.RepoRecord, err error)
 	// Create a repository
 	Create(ctx context.Context, repository *model.RepoRecord) (id int64, err error)
+	// Ensure creates the repository if no repository with the same name exists,
+	// and returns the ID of the created or existing one
+	Ensure(ctx context.Context, repository *model.RepoRecord) (created bool, id int64, err error)
 	// Delete the repository specified by ID
 	Delete(ctx context.Context, id int64) (err error)
 	// Update updates the repository. Only the properties specified by "props" will be updated if it is set
@@ -92,6 +95,10 @@ func (m *manager) GetByName(ctx context.Context, name string) (repository *model
 
 func (m *manager) Create(ctx context.Context, repository *model.RepoRecord) (int64, error) {
 	return m.dao.Create(ctx, repository)
+}
+
+func (m *manager) Ensure(ctx context.Context, repository *model.RepoRecord) (bool, int64, error) {
+	return m.dao.Ensure(ctx, repository)
 }
 
 func (m *manager) Delete(ctx context.Context, id int64) error {

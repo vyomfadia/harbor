@@ -43,10 +43,17 @@ func (m *managerTestSuite) SetupTest() {
 }
 
 func (m *managerTestSuite) TestEnsure() {
-	mock.OnAnything(m.dao, "List").Return([]*dao.Accessory{}, nil)
-	mock.OnAnything(m.dao, "Create").Return(int64(1), nil)
-	err := m.mgr.Ensure(nil, string(""), string(""), int64(1), int64(2), int64(1), "sha256:1234", model.TypeCosignSignature)
+	mock.OnAnything(m.dao, "Ensure").Return(true, int64(1), nil)
+	err := m.mgr.Ensure(nil, model.AccessoryData{
+		ArtifactID:        2,
+		SubArtifactID:     1,
+		SubArtifactDigest: "sha256:5678",
+		Size:              1,
+		Digest:            "sha256:1234",
+		Type:              model.TypeCosignSignature,
+	})
 	m.Require().Nil(err)
+	m.dao.AssertExpectations(m.T())
 }
 
 func (m *managerTestSuite) TestList() {

@@ -15,7 +15,6 @@
 package cosign
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,7 +27,6 @@ import (
 	"github.com/goharbor/harbor/src/lib"
 	"github.com/goharbor/harbor/src/lib/errors"
 	"github.com/goharbor/harbor/src/lib/log"
-	"github.com/goharbor/harbor/src/lib/orm"
 	"github.com/goharbor/harbor/src/pkg/accessory"
 	"github.com/goharbor/harbor/src/pkg/accessory/model"
 	"github.com/goharbor/harbor/src/pkg/distribution"
@@ -167,14 +165,9 @@ func SignatureMiddleware() func(http.Handler) http.Handler {
 			if subjectArt != nil {
 				accData.SubArtifactID = subjectArt.ID
 			}
-			if err := orm.WithTransaction(func(ctx context.Context) error {
-				_, err := accessory.Mgr.Create(ctx, accData)
+			if err := accessory.Mgr.Ensure(ctx, accData); err != nil {
+				logger.Errorf("failed to create cosign signature artifact: %s, error: %v", desc.Digest.String(), err)
 				return err
-			})(orm.SetTransactionOpNameToContext(ctx, "tx-create-cosign-accessory")); err != nil {
-				if !errors.IsConflictErr(err) {
-					logger.Errorf("failed to create cosign signature artifact: %s, error: %v", desc.Digest.String(), err)
-					return err
-				}
 			}
 		}
 

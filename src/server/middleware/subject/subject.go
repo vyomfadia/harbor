@@ -15,7 +15,6 @@
 package subject
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -30,7 +29,6 @@ import (
 	"github.com/goharbor/harbor/src/lib"
 	"github.com/goharbor/harbor/src/lib/errors"
 	"github.com/goharbor/harbor/src/lib/log"
-	"github.com/goharbor/harbor/src/lib/orm"
 	"github.com/goharbor/harbor/src/lib/q"
 	"github.com/goharbor/harbor/src/pkg/accessory"
 	"github.com/goharbor/harbor/src/pkg/accessory/model"
@@ -172,21 +170,15 @@ func Middleware() func(http.Handler) http.Handler {
 			if subjectArt != nil {
 				accData.SubArtifactID = subjectArt.ID
 			}
-			if err := orm.WithTransaction(func(ctx context.Context) error {
-				source := sourceLocal
-				securityCtx, exist := security.FromContext(ctx)
-				if exist && securityCtx != nil && securityCtx.GetUsername() == proxycachesecret.ProxyCacheService {
-					source = sourceProxyCache
-				}
-				logger.Debugf("source: %s", source)
-				accData.Source = source
-				_, err := accessory.Mgr.Create(ctx, accData)
+			accData.Source = sourceLocal
+			securityCtx, exist := security.FromContext(ctx)
+			if exist && securityCtx != nil && securityCtx.GetUsername() == proxycachesecret.ProxyCacheService {
+				accData.Source = sourceProxyCache
+			}
+			logger.Debugf("source: %s", accData.Source)
+			if err := accessory.Mgr.Ensure(ctx, accData); err != nil {
+				logger.Errorf("failed to create subject accessory artifact: %s, error: %v", art.Digest, err)
 				return err
-			})(orm.SetTransactionOpNameToContext(ctx, "tx-create-subject-accessory")); err != nil {
-				if !errors.IsConflictErr(err) {
-					logger.Errorf("failed to create subject accessory artifact: %s, error: %v", art.Digest, err)
-					return err
-				}
 			}
 
 			// when subject artifact is pushed after accessory artifact, current subject artifact do not exist.

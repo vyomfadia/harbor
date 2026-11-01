@@ -75,7 +75,7 @@ func (c *controllerTestSuite) TestEnsure() {
 	c.proMgr.On("Get", mock.AnythingOfType("*context.valueCtx"), "library").Return(&proModels.Project{
 		ProjectID: 1,
 	}, nil)
-	c.repoMgr.On("Create", mock.Anything, mock.Anything).Return(int64(1), nil)
+	c.repoMgr.On("Ensure", mock.Anything, mock.Anything).Return(true, int64(1), nil)
 	created, id, err = c.ctl.Ensure(orm.NewContext(nil, &ormtesting.FakeOrmer{}), "library/hello-world")
 	c.Require().Nil(err)
 	c.repoMgr.AssertExpectations(c.T())

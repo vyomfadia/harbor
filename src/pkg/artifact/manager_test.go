@@ -51,6 +51,10 @@ func (f *fakeDao) Create(ctx context.Context, artifact *dao.Artifact) (int64, er
 	args := f.Called()
 	return int64(args.Int(0)), args.Error(1)
 }
+func (f *fakeDao) Ensure(ctx context.Context, artifact *dao.Artifact) (bool, int64, error) {
+	args := f.Called()
+	return args.Bool(0), int64(args.Int(1)), args.Error(2)
+}
 func (f *fakeDao) Delete(ctx context.Context, id int64) error {
 	args := f.Called()
 	return args.Error(0)
@@ -245,6 +249,30 @@ func (m *managerTestSuite) TestCreate() {
 	m.Require().Nil(err)
 	m.dao.AssertExpectations(m.T())
 	m.Equal(int64(1), id)
+}
+
+func (m *managerTestSuite) TestEnsure() {
+	art := &Artifact{
+		References: []*Reference{
+			{
+				ChildID: 2,
+			},
+		},
+	}
+	m.dao.On("Ensure").Return(true, 1, nil).Once()
+	m.dao.On("CreateReference").Return(1, nil).Once()
+	created, id, err := m.mgr.Ensure(nil, art)
+	m.Require().Nil(err)
+	m.True(created)
+	m.Equal(int64(1), id)
+
+	// the references are created along with the artifact only
+	m.dao.On("Ensure").Return(false, 1, nil).Once()
+	created, id, err = m.mgr.Ensure(nil, art)
+	m.Require().Nil(err)
+	m.False(created)
+	m.Equal(int64(1), id)
+	m.dao.AssertExpectations(m.T())
 }
 
 func (m *managerTestSuite) TestDelete() {
