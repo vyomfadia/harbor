@@ -37,6 +37,9 @@ type Manager interface {
 	Get(ctx context.Context, id int64) (tag *tag.Tag, err error)
 	// Create the tag and returns the ID
 	Create(ctx context.Context, tag *tag.Tag) (id int64, err error)
+	// Ensure creates the tag if no tag with the same name exists under the repository,
+	// and returns the ID of the created or existing one
+	Ensure(ctx context.Context, tag *tag.Tag) (created bool, id int64, err error)
 	// Update the tag. Only the properties specified by "props" will be updated if it is set
 	Update(ctx context.Context, tag *tag.Tag, props ...string) (err error)
 	// Delete the tag specified by ID
@@ -70,6 +73,10 @@ func (m *manager) Get(ctx context.Context, id int64) (*tag.Tag, error) {
 
 func (m *manager) Create(ctx context.Context, tag *tag.Tag) (int64, error) {
 	return m.dao.Create(ctx, tag)
+}
+
+func (m *manager) Ensure(ctx context.Context, tag *tag.Tag) (bool, int64, error) {
+	return m.dao.Ensure(ctx, tag)
 }
 
 func (m *manager) Update(ctx context.Context, tag *tag.Tag, props ...string) error {

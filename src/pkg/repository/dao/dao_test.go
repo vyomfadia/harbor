@@ -32,6 +32,7 @@ import (
 	"github.com/goharbor/harbor/src/pkg/repository/model"
 	tag_dao "github.com/goharbor/harbor/src/pkg/tag/dao"
 	"github.com/goharbor/harbor/src/pkg/tag/model/tag"
+	ormtesting "github.com/goharbor/harbor/src/testing/lib/orm"
 )
 
 var (
@@ -135,6 +136,65 @@ func (d *daoTestSuite) TestCreate() {
 	_, err := d.dao.Create(d.ctx, repository)
 	d.Require().NotNil(err)
 	d.True(errors.IsErr(err, errors.ConflictCode))
+}
+
+func (d *daoTestSuite) TestEnsure() {
+	now := time.Date(2024, 1, 2, 3, 4, 5, 123456789, time.UTC)
+	for _, repo := range []model.RepoRecord{
+		{ProjectID: 1, Description: "desc", PullCount: 1, StarCount: 2, CreationTime: now, UpdateTime: now.Add(time.Hour)},
+		// filled by auto_now(_add)
+		{ProjectID: 1},
+	} {
+		created := repo
+		created.Name = repository + "/created"
+		createdID, err := d.dao.Create(d.ctx, &created)
+		d.Require().NoError(err)
+
+		ensured := repo
+		ensured.Name = repository + "/ensured"
+		ok, ensuredID, err := d.dao.Ensure(d.ctx, &ensured)
+		d.Require().NoError(err)
+		d.True(ok)
+
+		// the same row as Create writes
+		omit := []string{"repository_id", "name"}
+		if repo.CreationTime.IsZero() {
+			d.False(ensured.CreationTime.IsZero())
+			d.False(ensured.UpdateTime.IsZero())
+			omit = append(omit, "creation_time", "update_time")
+		}
+		createdRow, err := ormtesting.RowJSON(d.ctx, "repository", "repository_id", createdID, omit...)
+		d.Require().NoError(err)
+		ensuredRow, err := ormtesting.RowJSON(d.ctx, "repository", "repository_id", ensuredID, omit...)
+		d.Require().NoError(err)
+		d.Equal(createdRow, ensuredRow)
+
+		d.Require().NoError(d.dao.Delete(d.ctx, createdID))
+		d.Require().NoError(d.dao.Delete(d.ctx, ensuredID))
+	}
+
+	// exists
+	ok, id, err := d.dao.Ensure(d.ctx, &model.RepoRecord{Name: repository, ProjectID: 1})
+	d.Require().NoError(err)
+	d.False(ok)
+	d.Equal(d.id, id)
+}
+
+func (d *daoTestSuite) TestEnsureConcurrently() {
+	name := repository + "/concurrent"
+	result := ormtesting.EnsureConcurrently(d.ctx, 16, func(ctx context.Context) (bool, int64, error) {
+		return d.dao.Ensure(ctx, &model.RepoRecord{Name: name, ProjectID: 1})
+	})
+	d.Require().Empty(result.Errs)
+	d.Equal(1, result.Created)
+	d.Require().Len(result.IDs, 16)
+	for _, id := range result.IDs {
+		d.Equal(result.IDs[0], id)
+	}
+	total, err := d.dao.Count(d.ctx, q.New(q.KeyWords{"Name": name}))
+	d.Require().NoError(err)
+	d.Equal(int64(1), total)
+	d.Require().NoError(d.dao.Delete(d.ctx, result.IDs[0]))
 }
 
 func (d *daoTestSuite) TestDelete() {

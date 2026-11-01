@@ -21,7 +21,6 @@ import (
 	"github.com/goharbor/harbor/src/controller/artifact"
 	"github.com/goharbor/harbor/src/lib/errors"
 	"github.com/goharbor/harbor/src/lib/log"
-	"github.com/goharbor/harbor/src/lib/orm"
 	"github.com/goharbor/harbor/src/lib/q"
 	"github.com/goharbor/harbor/src/pkg"
 	art "github.com/goharbor/harbor/src/pkg/artifact"
@@ -93,36 +92,10 @@ func (c *controller) Ensure(ctx context.Context, name string) (bool, int64, erro
 		return false, 0, err
 	}
 
-	var (
-		created bool
-		id      int64
-	)
-	// use orm.WithTransaction here to avoid the issue:
-	// https://www.postgresql.org/message-id/002e01c04da9%24a8f95c20%2425efe6c1%40lasting.ro
-	if err = orm.WithTransaction(func(ctx context.Context) error {
-		id, err = c.repoMgr.Create(ctx, &model.RepoRecord{
-			ProjectID: project.ProjectID,
-			Name:      name,
-		})
-		if err != nil {
-			return err
-		}
-		created = true
-		return nil
-	})(orm.SetTransactionOpNameToContext(ctx, "tx-repository-ensure")); err != nil {
-		// isn't conflict error, return directly
-		if !errors.IsConflictErr(err) {
-			return false, 0, err
-		}
-		// if got conflict error, try to get again
-		repository, err = c.repoMgr.GetByName(ctx, name)
-		if err != nil {
-			return false, 0, err
-		}
-		id = repository.RepositoryID
-	}
-
-	return created, id, nil
+	return c.repoMgr.Ensure(ctx, &model.RepoRecord{
+		ProjectID: project.ProjectID,
+		Name:      name,
+	})
 }
 
 func (c *controller) Count(ctx context.Context, query *q.Query) (int64, error) {

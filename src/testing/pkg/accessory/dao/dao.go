@@ -118,6 +118,41 @@ func (_m *DAO) DeleteAccessories(ctx context.Context, query *q.Query) (int64, er
 	return r0, r1
 }
 
+// Ensure provides a mock function with given fields: ctx, accessory
+func (_m *DAO) Ensure(ctx context.Context, accessory *dao.Accessory) (bool, int64, error) {
+	ret := _m.Called(ctx, accessory)
+
+	if len(ret) == 0 {
+		panic("no return value specified for Ensure")
+	}
+
+	var r0 bool
+	var r1 int64
+	var r2 error
+	if rf, ok := ret.Get(0).(func(context.Context, *dao.Accessory) (bool, int64, error)); ok {
+		return rf(ctx, accessory)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, *dao.Accessory) bool); ok {
+		r0 = rf(ctx, accessory)
+	} else {
+		r0 = ret.Get(0).(bool)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, *dao.Accessory) int64); ok {
+		r1 = rf(ctx, accessory)
+	} else {
+		r1 = ret.Get(1).(int64)
+	}
+
+	if rf, ok := ret.Get(2).(func(context.Context, *dao.Accessory) error); ok {
+		r2 = rf(ctx, accessory)
+	} else {
+		r2 = ret.Error(2)
+	}
+
+	return r0, r1, r2
+}
+
 // Get provides a mock function with given fields: ctx, id
 func (_m *DAO) Get(ctx context.Context, id int64) (*dao.Accessory, error) {
 	ret := _m.Called(ctx, id)

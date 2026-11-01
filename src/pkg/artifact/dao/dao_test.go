@@ -29,6 +29,7 @@ import (
 	"github.com/goharbor/harbor/src/lib/q"
 	tagdao "github.com/goharbor/harbor/src/pkg/tag/dao"
 	"github.com/goharbor/harbor/src/pkg/tag/model/tag"
+	ormtesting "github.com/goharbor/harbor/src/testing/lib/orm"
 )
 
 type daoTestSuite struct {
@@ -360,6 +361,85 @@ func (d *daoTestSuite) TestCreate() {
 	_, err := d.dao.Create(d.ctx, artifact)
 	d.Require().NotNil(err)
 	d.True(errors.IsErr(err, errors.ConflictCode))
+}
+
+func (d *daoTestSuite) TestEnsure() {
+	pushTime := time.Date(2024, 1, 2, 3, 4, 5, 123456789, time.UTC)
+	for _, art := range []Artifact{
+		{
+			Type:              "IMAGE",
+			MediaType:         v1.MediaTypeImageConfig,
+			ManifestMediaType: v1.MediaTypeImageManifest,
+			ArtifactType:      v1.MediaTypeImageConfig,
+			ProjectID:         1,
+			RepositoryID:      1001,
+			RepositoryName:    "library/ensure",
+			Size:              1024,
+			Icon:              "sha256:icon",
+			PushTime:          pushTime,
+			PullTime:          pushTime.Add(time.Hour),
+			ExtraAttrs:        `{"attr1":"value1"}`,
+			Annotations:       `{"anno1":"value1"}`,
+		},
+		{
+			// empty and zero values
+			RepositoryID: 1001,
+			PushTime:     pushTime,
+		},
+	} {
+		created := art
+		created.Digest = "sha256:created"
+		createdID, err := d.dao.Create(d.ctx, &created)
+		d.Require().NoError(err)
+
+		ensured := art
+		ensured.Digest = "sha256:ensured"
+		ok, ensuredID, err := d.dao.Ensure(d.ctx, &ensured)
+		d.Require().NoError(err)
+		d.True(ok)
+
+		// the same row as Create writes
+		createdRow, err := ormtesting.RowJSON(d.ctx, "artifact", "id", createdID, "id", "digest")
+		d.Require().NoError(err)
+		ensuredRow, err := ormtesting.RowJSON(d.ctx, "artifact", "id", ensuredID, "id", "digest")
+		d.Require().NoError(err)
+		d.Equal(createdRow, ensuredRow)
+
+		// exists
+		ok, id, err := d.dao.Ensure(d.ctx, &ensured)
+		d.Require().NoError(err)
+		d.False(ok)
+		d.Equal(ensuredID, id)
+
+		d.Require().NoError(d.dao.Delete(d.ctx, createdID))
+		d.Require().NoError(d.dao.Delete(d.ctx, ensuredID))
+	}
+}
+
+func (d *daoTestSuite) TestEnsureConcurrently() {
+	art := &Artifact{
+		Type:              "IMAGE",
+		MediaType:         v1.MediaTypeImageConfig,
+		ManifestMediaType: v1.MediaTypeImageManifest,
+		ProjectID:         1,
+		RepositoryID:      1002,
+		RepositoryName:    "library/concurrent",
+		Digest:            "sha256:concurrent",
+		PushTime:          time.Now(),
+	}
+	result := ormtesting.EnsureConcurrently(d.ctx, 16, func(ctx context.Context) (bool, int64, error) {
+		return d.dao.Ensure(ctx, art)
+	})
+	d.Require().Empty(result.Errs)
+	d.Equal(1, result.Created)
+	d.Require().Len(result.IDs, 16)
+	for _, id := range result.IDs {
+		d.Equal(result.IDs[0], id)
+	}
+	total, err := d.dao.Count(d.ctx, q.New(q.KeyWords{"RepositoryID": art.RepositoryID}))
+	d.Require().NoError(err)
+	d.Equal(int64(1), total)
+	d.Require().NoError(d.dao.Delete(d.ctx, result.IDs[0]))
 }
 
 func (d *daoTestSuite) TestDelete() {

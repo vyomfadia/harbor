@@ -22,7 +22,6 @@ import (
 	"strings"
 	"time"
 
-	beegoorm "github.com/beego/beego/v2/client/orm"
 	"github.com/docker/distribution/manifest/schema2"
 
 	"github.com/goharbor/harbor/src/lib/errors"
@@ -104,15 +103,11 @@ type dao struct{}
 const associateBatchSize = 1000
 
 func (d *dao) CreateArtifactAndBlob(ctx context.Context, artifactDigest, blobDigest string) (int64, error) {
-	o, err := orm.FromContext(ctx)
-	if err != nil {
-		return 0, err
-	}
-
 	// see CreateProjectBlob for why DO NOTHING is used
-	id, err := insertOrGetID(o,
+	id, _, err := orm.InsertOrGetID(ctx,
 		`INSERT INTO artifact_blob (digest_af, digest_blob, creation_time) VALUES (?, ?, ?)
 ON CONFLICT (digest_af, digest_blob) DO NOTHING RETURNING id`,
+		[]any{artifactDigest, blobDigest, time.Now()},
 		`SELECT id FROM artifact_blob WHERE digest_af = ? AND digest_blob = ?`,
 		artifactDigest, blobDigest)
 	if err != nil {
@@ -120,26 +115,6 @@ ON CONFLICT (digest_af, digest_blob) DO NOTHING RETURNING id`,
 	}
 
 	return id, nil
-}
-
-// insertOrGetID runs insert, which returns no row on conflict, then query for the existing id.
-// Both are retried as the existing row can be deleted by others in between.
-func insertOrGetID(o beegoorm.QueryExecutor, insert, query string, args ...any) (int64, error) {
-	var (
-		id  int64
-		err error
-	)
-	for range 3 {
-		err = o.Raw(insert, append(args, time.Now())...).QueryRow(&id)
-		if !errors.Is(err, orm.ErrNoRows) {
-			return id, err
-		}
-		err = o.Raw(query, args...).QueryRow(&id)
-		if !errors.Is(err, orm.ErrNoRows) {
-			return id, err
-		}
-	}
-	return 0, errors.ConflictError(nil).WithMessage("the row is being deleted and recreated concurrently, retry later")
 }
 
 func (d *dao) GetArtifactAndBlob(ctx context.Context, artifactDigest, blobDigest string) (*models.ArtifactAndBlob, error) {
@@ -371,16 +346,12 @@ func (d *dao) SumBlobsSize(ctx context.Context, excludeForeignLayer bool) (int64
 }
 
 func (d *dao) CreateProjectBlob(ctx context.Context, projectID, blobID int64) (int64, error) {
-	o, err := orm.FromContext(ctx)
-	if err != nil {
-		return 0, err
-	}
-
 	// DO NOTHING instead of DO UPDATE, the latter row-locks the existing association until
 	// the transaction ends, which deadlocks concurrent pushes sharing blobs
-	id, err := insertOrGetID(o,
+	id, _, err := orm.InsertOrGetID(ctx,
 		`INSERT INTO project_blob (project_id, blob_id, creation_time) VALUES (?, ?, ?)
 ON CONFLICT (project_id, blob_id) DO NOTHING RETURNING id`,
+		[]any{projectID, blobID, time.Now()},
 		`SELECT id FROM project_blob WHERE project_id = ? AND blob_id = ?`,
 		projectID, blobID)
 	if err != nil {

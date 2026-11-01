@@ -101,22 +101,25 @@ func (c *controllerTestSuite) TestEnsureTag() {
 
 	// the tag doesn't exist under the repository, create it
 	c.tagMgr.On("List", mock.Anything, mock.Anything).Return([]*tag.Tag{}, nil)
-	c.tagMgr.On("Create", mock.Anything, mock.Anything).Return(int64(1), nil)
+	c.tagMgr.On("Ensure", mock.Anything, mock.Anything).Return(true, int64(1), nil)
 	c.repoMgr.On("Touch", mock.Anything, int64(1)).Return(nil).Once()
-	_, err = c.ctl.Ensure(orm.NewContext(nil, &ormtesting.FakeOrmer{}), 1, 1, "latest")
+	id, err := c.ctl.Ensure(orm.NewContext(nil, &ormtesting.FakeOrmer{}), 1, 1, "latest")
 	c.Require().Nil(err)
+	c.Equal(int64(1), id)
 	c.tagMgr.AssertExpectations(c.T())
 	c.repoMgr.AssertExpectations(c.T())
 
 	// reset the mock
 	c.SetupTest()
 
-	// a concurrent create conflict means this request did not change tag state
+	// the tag is created by others concurrently, return it without touching the repository
 	c.tagMgr.On("List", mock.Anything, mock.Anything).Return([]*tag.Tag{}, nil)
-	c.tagMgr.On("Create", mock.Anything, mock.Anything).Return(int64(0), errors.ConflictError(nil))
-	_, err = c.ctl.Ensure(orm.NewContext(nil, &ormtesting.FakeOrmer{}), 1, 1, "latest")
+	c.tagMgr.On("Ensure", mock.Anything, mock.Anything).Return(false, int64(2), nil)
+	id, err = c.ctl.Ensure(orm.NewContext(nil, &ormtesting.FakeOrmer{}), 1, 1, "latest")
 	c.Require().Nil(err)
+	c.Equal(int64(2), id)
 	c.tagMgr.AssertExpectations(c.T())
+	c.repoMgr.AssertExpectations(c.T())
 }
 
 func (c *controllerTestSuite) TestCount() {
@@ -160,6 +163,14 @@ func (c *controllerTestSuite) TestCreate() {
 	c.Require().Nil(err)
 	c.Equal(int64(1), id)
 	c.repoMgr.AssertExpectations(c.T())
+
+	// reset the mock
+	c.SetupTest()
+
+	// the API reports the existing tag as conflict
+	c.tagMgr.On("Create", mock.Anything, mock.Anything).Return(int64(0), errors.ConflictError(nil))
+	_, err = c.ctl.Create(nil, &Tag{Tag: tag.Tag{RepositoryID: 1, Name: "v1"}})
+	c.True(errors.IsConflictErr(err))
 }
 
 func (c *controllerTestSuite) TestDelete() {
