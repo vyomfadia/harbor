@@ -55,7 +55,8 @@ jobs:
   test:
     name: ${{ matrix.suite }}
     needs: images
-    runs-on: ubuntu-latest
+    # the e2e engine image's bundled dockerd fails to start on ubuntu-26.04 hosts
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     strategy:
       fail-fast: false
@@ -117,6 +118,7 @@ jobs:
           name: ${{ matrix.suite }}-logs
           path: |
             harbor-logs.tar.gz
+            daemon-docker-local.log
             output.xml
             log.html
             report.html
