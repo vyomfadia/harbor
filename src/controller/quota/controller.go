@@ -414,6 +414,11 @@ func (c *controller) calcQuota(ctx context.Context, reference, referenceID strin
 
 func (c *controller) Update(ctx context.Context, u *quota.Quota) error {
 	f := func() error {
+		// stop retrying once the caller gives up, e.g. the per quota timeout of the flusher
+		if ctx.Err() != nil {
+			return retry.Abort(ctx.Err())
+		}
+
 		q, err := c.quotaMgr.GetByRef(ctx, u.Reference, u.ReferenceID)
 		if err != nil {
 			if errors.IsNotFoundErr(err) {
