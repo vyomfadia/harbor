@@ -33,6 +33,14 @@ registry:
     image: {repository: ghcr.io/vyomfadia/harbor-registryctl, tag: <tag>}
 ```
 
+`POSTGRESQL_MIGRATION_URL` (core and any migration hook job) points schema migrations at a
+direct PostgreSQL connection, e.g. `postgresql://migrator:password@postgres:5432/registry?sslmode=require`,
+so the runtime `POSTGRESQL_*` settings can go through PgBouncer (transaction pooling with
+`max_prepared_statements > 0`). Unset keeps the current behaviour.
+
+With `QUOTA_UPDATE_PROVIDER=redis`, manifest PUT and blob mount no longer hold a database transaction
+across the registry request. The database quota provider keeps the request-wide transaction.
+
 ---
 
 # Harbor

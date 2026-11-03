@@ -43,19 +43,19 @@ func PutBlobUploadMiddleware() func(http.Handler) http.Handler {
 		}
 
 		ctx := r.Context()
+		ctx = log.WithLogger(ctx, log.G(ctx).WithFields(log.Fields{"url": r.URL.Path, "digest": w.Header().Get("Docker-Content-Digest")}))
+
+		logger := log.G(ctx).WithFields(log.Fields{"middleware": "blob"})
+		size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
+		if err != nil || size == 0 {
+			size, err = blobController.GetAcceptedBlobSize(ctx, distribution.ParseSessionID(r.URL.Path))
+		}
+		if err != nil {
+			logger.Errorf("get blob size failed, error: %v", err)
+			return err
+		}
 
 		h := func(ctx context.Context) error {
-			logger := log.G(ctx).WithFields(log.Fields{"middleware": "blob"})
-
-			size, err := strconv.ParseInt(r.Header.Get("Content-Length"), 10, 64)
-			if err != nil || size == 0 {
-				size, err = blobController.GetAcceptedBlobSize(ctx, distribution.ParseSessionID(r.URL.Path))
-			}
-			if err != nil {
-				logger.Errorf("get blob size failed, error: %v", err)
-				return err
-			}
-
 			p, err := projectController.GetByName(ctx, distribution.ParseProjectName(r.URL.Path))
 			if err != nil {
 				logger.Errorf("get project failed, error: %v", err)
@@ -77,7 +77,7 @@ func PutBlobUploadMiddleware() func(http.Handler) http.Handler {
 			return nil
 		}
 
-		return orm.WithTransaction(h)(orm.SetTransactionOpNameToContext(ctx, "tx-put-blob-mw"))
+		return orm.WithRetryableTransaction(h)(orm.SetTransactionOpNameToContext(ctx, "tx-put-blob-mw"))
 	})
 
 	return middleware.Chain(before, after)

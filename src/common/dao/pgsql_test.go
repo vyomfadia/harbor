@@ -16,10 +16,13 @@ package dao
 
 import (
 	"fmt"
+	"os"
+	"strconv"
 	"sync"
 	"testing"
 
 	"github.com/beego/beego/v2/client/orm"
+	"github.com/goharbor/harbor/src/common/models"
 )
 
 func TestMaxOpenConns(t *testing.T) {
@@ -48,5 +51,35 @@ func TestMaxOpenConns(t *testing.T) {
 		if !success {
 			t.Fatal("max open conns not work")
 		}
+	}
+}
+
+// TestMigrationURLOverride uses the test database as the direct endpoint and an
+// unreachable runtime endpoint to prove that both migration paths use the override.
+func TestMigrationURLOverride(t *testing.T) {
+	port, err := strconv.Atoi(os.Getenv("POSTGRESQL_PORT"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	direct, err := migrationDatabaseURL(&models.PostGreSQL{
+		Host: os.Getenv("POSTGRESQL_HOST"), Port: port,
+		Username: os.Getenv("POSTGRESQL_USR"), Password: os.Getenv("POSTGRESQL_PWD"),
+		Database: os.Getenv("POSTGRESQL_DATABASE"), SSLMode: "disable",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("POSTGRESQL_MIGRATION_URL", direct)
+	runtime := &models.PostGreSQL{Host: "127.0.0.1", Port: 1, Database: "unreachable", SSLMode: "disable"}
+	m, err := NewMigrator(runtime)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	if _, _, err := m.Version(); err != nil {
+		t.Fatal(err)
+	}
+	if err := UpgradeSchema(&models.Database{Type: "postgresql", PostGreSQL: runtime}); err != nil {
+		t.Fatal(err)
 	}
 }
