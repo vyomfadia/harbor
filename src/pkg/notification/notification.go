@@ -132,6 +132,12 @@ func NewContext(ctx context.Context, ec *EventCtx) context.Context {
 	return context.WithValue(ctx, eventKey{}, ec)
 }
 
+// FromContext returns the event context carried by ctx
+func FromContext(ctx context.Context) (*EventCtx, bool) {
+	e, ok := ctx.Value(eventKey{}).(*EventCtx)
+	return e, ok
+}
+
 // AddEvent add events into request context, the event will be sent by the notification middleware eventually.
 func AddEvent(ctx context.Context, m n_event.Metadata, notify ...bool) {
 	if m == nil {

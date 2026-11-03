@@ -15,6 +15,10 @@
 package middlewares
 
 import (
+	"github.com/goharbor/harbor/src/common"
+	"github.com/goharbor/harbor/src/lib/config"
+	_ "github.com/goharbor/harbor/src/pkg/config/inmemory"
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -46,5 +50,29 @@ func Test_readonlySkipper(t *testing.T) {
 				t.Errorf("readonlySkippers() = %v, want %v", tt.args, tt.want)
 			}
 		})
+	}
+}
+
+func TestPushTransactionSkippers(t *testing.T) {
+	old := config.DefaultCfgManager
+	defer func() { config.DefaultCfgManager = old }()
+	for _, provider := range []string{"db", "redis"} {
+		config.InitWithSettings(map[string]any{common.QuotaUpdateProvider: provider})
+		for _, route := range []struct{ method, path string }{
+			{http.MethodPut, "/v2/library/test/manifests/latest"},
+			{http.MethodPut, "/v2/library/test/manifests/sha256:abc"},
+			{http.MethodPost, "/v2/library/test/blobs/uploads/"},
+		} {
+			req := httptest.NewRequest(route.method, route.path, nil)
+			skipped := false
+			for _, skipper := range dbTxSkippers {
+				skipped = skipped || skipper(req)
+			}
+			require.Equal(t, provider == "redis", skipped, "%s %s provider=%s", route.method, route.path, provider)
+		}
+		req := httptest.NewRequest(http.MethodDelete, "/v2/library/test/manifests/sha256:abc", nil)
+		for _, skipper := range dbTxSkippers {
+			require.False(t, skipper(req))
+		}
 	}
 }

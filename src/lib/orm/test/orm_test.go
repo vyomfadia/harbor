@@ -17,6 +17,7 @@ package test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -423,6 +424,74 @@ func (suite *OrmSuite) TestPaginationOnRawSQL() {
 	suite.Equal("select * from harbor_user where user_id > ? order by user_name  limit ? offset ?", sql)
 	suite.Equal(int64(10), params[1])
 	suite.Equal(int64(0), params[2])
+}
+
+// TestWithRetryableTransactionDeadlock forces a real deadlock between two
+// transactions which update the same rows in the opposite order, PostgreSQL
+// aborts one of them with 40P01 and the retry of it succeeds
+func (suite *OrmSuite) TestWithRetryableTransactionDeadlock() {
+	ctx := NewContext(context.TODO(), orm.NewOrm())
+	idA, err := addFoo(ctx, Foo{Name: "deadlock-a"})
+	suite.Require().NoError(err)
+	idB, err := addFoo(ctx, Foo{Name: "deadlock-b"})
+	suite.Require().NoError(err)
+	defer func() {
+		suite.NoError(deleteFoo(ctx, idA))
+		suite.NoError(deleteFoo(ctx, idB))
+	}()
+
+	update := func(ctx context.Context, id int64, name string) error {
+		o, err := FromContext(ctx)
+		if err != nil {
+			return err
+		}
+		_, err = o.Raw("UPDATE foo SET name = ? WHERE id = ?", name, id).Exec()
+		return err
+	}
+
+	// both transactions lock their first row before any of them locks its
+	// second row on the first attempt, which guarantees the deadlock
+	var locked sync.WaitGroup
+	locked.Add(2)
+	var attempts [2]int
+	var errs [2]error
+	var wg sync.WaitGroup
+	for i, ids := range [][2]int64{{idA, idB}, {idB, idA}} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx := NewContext(context.TODO(), orm.NewOrm())
+			errs[i] = WithRetryableTransaction(func(ctx context.Context) error {
+				attempts[i]++
+				if err := update(ctx, ids[0], fmt.Sprintf("tx%d-first", i)); err != nil {
+					return err
+				}
+				if attempts[i] == 1 {
+					locked.Done()
+					locked.Wait()
+				}
+				return update(ctx, ids[1], fmt.Sprintf("tx%d-second", i))
+			})(SetTransactionOpNameToContext(ctx, "tx-test-deadlock"))
+		}()
+	}
+	wg.Wait()
+
+	suite.NoError(errs[0])
+	suite.NoError(errs[1])
+	// exactly one of the transactions was the deadlock victim and was retried
+	suite.Equal(3, attempts[0]+attempts[1], "attempts: %v", attempts)
+
+	// the transaction which was retried committed last and owns both rows
+	winner := 0
+	if attempts[1] == 2 {
+		winner = 1
+	}
+	a, err := readFoo(ctx, idA)
+	suite.Require().NoError(err)
+	b, err := readFoo(ctx, idB)
+	suite.Require().NoError(err)
+	suite.Contains(a.Name, fmt.Sprintf("tx%d-", winner))
+	suite.Contains(b.Name, fmt.Sprintf("tx%d-", winner))
 }
 
 func TestRunOrmSuite(t *testing.T) {
