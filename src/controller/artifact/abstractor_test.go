@@ -16,6 +16,8 @@ package artifact
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/docker/distribution"
@@ -494,4 +496,53 @@ func (a *abstractorTestSuite) TestAbstractMetadataOfUnsupported() {
 
 func TestAbstractorTestSuite(t *testing.T) {
 	suite.Run(t, &abstractorTestSuite{})
+}
+
+func (a *abstractorTestSuite) TestPreparedMetadataDoesNotRepeatRegistryReads() {
+	mf, _, err := distribution.UnmarshalManifest(schema2.MediaTypeManifest, []byte(v2Manifest))
+	a.Require().NoError(err)
+	a.regCli.On("PullManifest", "library/test", "digest").Return(mf, "", nil).Once()
+	a.processor.On("AbstractMetadata", mock.Anything, mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		art := args.Get(1).(*artifact.Artifact)
+		art.ExtraAttrs = map[string]any{"architecture": "amd64", "large": int64(9007199254740993)}
+		art.Icon = "icon-digest"
+	}).Return(nil).Once()
+	ctx, err := a.abstractor.prepareMetadata(context.Background(), "library/test", "digest")
+	a.Require().NoError(err)
+	for range 2 {
+		art := &artifact.Artifact{RepositoryName: "library/test", Digest: "digest", RepositoryID: 7, ProjectID: 8}
+		a.Require().NoError(a.abstractor.AbstractMetadata(ctx, art))
+		a.Equal(int64(7), art.RepositoryID)
+		a.Equal(int64(8), art.ProjectID)
+		a.Equal(int64(3043), art.Size)
+		a.Equal("icon-digest", art.Icon)
+		a.Equal("amd64", art.ExtraAttrs["architecture"])
+		a.Equal(json.Number("9007199254740993"), art.ExtraAttrs["large"])
+		// A failed attempt must not mutate the next attempt's metadata.
+		art.ExtraAttrs["architecture"] = "corrupted"
+	}
+	a.Error(a.abstractor.AbstractMetadata(ctx, &artifact.Artifact{RepositoryName: "other", Digest: "digest"}))
+	a.regCli.AssertExpectations(a.T())
+	a.processor.AssertExpectations(a.T())
+}
+
+func (a *abstractorTestSuite) TestPreparedIndexResolvesChildrenAgain() {
+	mf, _, err := distribution.UnmarshalManifest(v1.MediaTypeImageIndex, []byte(index))
+	a.Require().NoError(err)
+	a.regCli.On("PullManifest", "library/test", "digest").Return(mf, "", nil).Once()
+	// Preparation sees one set of IDs. Each transaction must resolve the live
+	// records again, including failing when a referenced child was deleted.
+	a.argMgr.On("GetByDigest", mock.Anything, mock.Anything, mock.Anything).Return(&artifact.Artifact{ID: 2, Size: 10}, nil).Twice()
+	ctx, err := a.abstractor.prepareMetadata(context.Background(), "library/test", "digest")
+	a.Require().NoError(err)
+	a.argMgr.On("GetByDigest", mock.Anything, mock.Anything, mock.Anything).Return(&artifact.Artifact{ID: 3, Size: 20}, nil).Twice()
+	art := &artifact.Artifact{RepositoryName: "library/test", Digest: "digest"}
+	a.Require().NoError(a.abstractor.AbstractMetadata(ctx, art))
+	a.Len(art.References, 2)
+	a.Equal(int64(3), art.References[0].ChildID)
+	a.Equal(int64(688), art.Size)
+	a.argMgr.On("GetByDigest", mock.Anything, mock.Anything, mock.Anything).Return(nil, fmt.Errorf("child deleted")).Once()
+	a.ErrorContains(a.abstractor.AbstractMetadata(ctx, &artifact.Artifact{RepositoryName: "library/test", Digest: "digest"}), "child deleted")
+	a.regCli.AssertExpectations(a.T())
+	a.argMgr.AssertExpectations(a.T())
 }

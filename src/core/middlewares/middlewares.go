@@ -20,6 +20,7 @@ import (
 
 	"github.com/beego/beego/v2/server/web"
 
+	"github.com/goharbor/harbor/src/lib/config"
 	"github.com/goharbor/harbor/src/pkg/distribution"
 	"github.com/goharbor/harbor/src/server/middleware"
 	"github.com/goharbor/harbor/src/server/middleware/artifactinfo"
@@ -53,9 +54,15 @@ var (
 	// until the API finished, this behavior may eat all the database connections.
 	// There are no database writing operations in the PATCH Blob APIs, so skip the transaction middleware is all ok.
 	// For the PUT Blob Upload API, we will make a transaction manually to write blob info to the database when put blob upload successfully.
+	// The PUT Manifest and POST Initiate Blob Upload (mount) APIs are skipped too: a transaction held across the
+	// registry round-trip keeps its row locks and amplifies deadlocks between concurrent pushes.
+	// With Redis quota accounting, their database writes run after the registry accepts the request.
+	// Database quota accounting retains the encompassing transaction for atomicity.
 	dbTxSkippers = []middleware.Skipper{
 		middleware.MethodAndPathSkipper(http.MethodPatch, distribution.BlobUploadURLRegexp),
 		middleware.MethodAndPathSkipper(http.MethodPut, distribution.BlobUploadURLRegexp),
+		redisPushTransactionSkipper(http.MethodPut, distribution.ManifestURLRegexp),
+		redisPushTransactionSkipper(http.MethodPost, distribution.InitiateBlobUploadRegexp),
 		middleware.MethodAndPathSkipper(http.MethodPost, match("^/service/token")),
 		func(r *http.Request) bool { // skip tx for GET, HEAD and Options requests
 			m := r.Method
@@ -102,5 +109,15 @@ func MiddleWares() []web.MiddleWare {
 		log.Middleware(), // log middleware should be after the security middleware so that the user info can be logged
 		security.UnauthorizedMiddleware(),
 		readonly.Middleware(readonlySkippers...),
+	}
+}
+
+// Redis quota reservations are already independent of the database transaction.
+// Keep the original boundary for the database quota provider so reservation and
+// metadata still commit atomically; never introduce a committed DB reservation.
+func redisPushTransactionSkipper(method string, path *regexp.Regexp) middleware.Skipper {
+	match := middleware.MethodAndPathSkipper(method, path)
+	return func(r *http.Request) bool {
+		return config.GetQuotaUpdateProvider() == "redis" && match(r)
 	}
 }

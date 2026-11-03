@@ -17,7 +17,6 @@ package dao
 import (
 	"fmt"
 	"net"
-	"net/url"
 	"os"
 	"strconv"
 	"time"
@@ -145,12 +144,9 @@ func (p *pgsql) UpgradeSchema() error {
 
 // NewMigrator creates a migrator base on the information
 func NewMigrator(database *models.PostGreSQL) (*migrate.Migrate, error) {
-	dbURL := url.URL{
-		Scheme:   "pgx5",
-		User:     url.UserPassword(database.Username, database.Password),
-		Host:     net.JoinHostPort(database.Host, strconv.Itoa(database.Port)),
-		Path:     database.Database,
-		RawQuery: fmt.Sprintf("sslmode=%s", database.SSLMode),
+	dbURL, err := migrationDatabaseURL(database, os.Getenv("POSTGRESQL_MIGRATION_URL"))
+	if err != nil {
+		return nil, err
 	}
 
 	// For UT
@@ -159,7 +155,7 @@ func NewMigrator(database *models.PostGreSQL) (*migrate.Migrate, error) {
 		path = defaultMigrationPath
 	}
 	srcURL := fmt.Sprintf("file://%s", path)
-	m, err := migrate.New(srcURL, dbURL.String())
+	m, err := migrate.New(srcURL, dbURL)
 	if err != nil {
 		return nil, err
 	}

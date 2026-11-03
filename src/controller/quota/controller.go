@@ -380,7 +380,15 @@ func (c *controller) Request(ctx context.Context, reference, referenceID string,
 	err := f()
 
 	if err != nil {
-		if er := c.updateUsageWithRetry(ctx, reference, referenceID, rollbackResources(resources), provider); er != nil {
+		rollbackCtx := ctx
+		// A disconnected client must not prevent releasing its Redis reservation.
+		// Keep the original ORM/transaction context for the database provider.
+		if provider == updateQuotaProviderRedis && ctx.Err() != nil {
+			var cancel context.CancelFunc
+			rollbackCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer cancel()
+		}
+		if er := c.updateUsageWithRetry(rollbackCtx, reference, referenceID, rollbackResources(resources), provider); er != nil {
 			// ignore this error, the quota usage will be correct when users do operations which will call refresh quota
 			log.G(ctx).Warningf("rollback resources %s for %s %s failed, error: %v", resources.String(), reference, referenceID, er)
 		}

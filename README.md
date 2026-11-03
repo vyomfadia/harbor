@@ -33,6 +33,41 @@ registry:
     image: {repository: ghcr.io/vyomfadia/harbor-registryctl, tag: <tag>}
 ```
 
+For a separate migration connection, set `POSTGRESQL_MIGRATION_URL` on the core
+container (and any core migration hook job), for example
+`postgresql://migrator:password@postgres:5432/registry?sslmode=require`.
+Use the existing `POSTGRESQL_*` settings for the runtime connection to PgBouncer.
+The override applies to both the migration schema-version check and schema upgrades;
+unset or empty preserves the existing connection settings. It must target the same
+database as the runtime connection. `postgres://`, `postgresql://`, and `pgx5://`
+URLs are accepted, including TLS query parameters and percent-encoded credentials.
+Supply the URL through a deployment secret. `skip-migrate` does not use it.
+Core still initializes its runtime database connection before running migrations.
+
+With `QUOTA_UPDATE_PROVIDER=redis`, manifest PUT and blob-upload initiation no
+longer hold a database transaction across registry requests. Manifest metadata
+(including config and icon reads) is prepared before a short transaction writes
+artifacts, tags, references and blob associations. Deadlock/serialization retries
+repeat only that transaction; failed attempts discard their events and cache
+callbacks. Redis quota reservation wraps the entire operation, including commit,
+so returned failures attempt to release the reservation, including after client
+cancellation. The database quota provider
+retains its encompassing transaction to preserve atomic quota accounting.
+
+For PgBouncer use transaction pooling and enable protocol prepared-statement
+support (`max_prepared_statements > 0`) for the pgx driver. See the
+[PgBouncer compatibility table](https://www.pgbouncer.org/features.html).
+The pool's server connection limit, rather than the sum of core client pools,
+should bound PostgreSQL connections. Redis quota retains its existing crash
+recovery behavior; this change does not make Redis reservations and PostgreSQL
+commits a distributed atomic operation.
+
+The push integrity integration test runs with PostgreSQL and Redis configured by
+`POSTGRESQL_*`, `POSTGRES_MIGRATION_SCRIPTS_PATH` and `_REDIS_URL_HARBOR`:
+`cd src && go test -race ./server/registry -run TestPushTransactionIntegrity`.
+It also runs through PgBouncer when the runtime settings point there and
+`POSTGRESQL_MIGRATION_URL` points directly to PostgreSQL.
+
 ---
 
 # Harbor
