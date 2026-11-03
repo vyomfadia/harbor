@@ -284,7 +284,14 @@ func prepareManifest() func(http.Handler) http.Handler {
 		if _, err := digest.Parse(reference); err != nil {
 			dgt = response.Header().Get("Docker-Content-Digest")
 		}
-		ctx, err := artifact.PrepareMetadata(req.Context(), router.Param(req.Context(), ":splat"), dgt)
+		repo := router.Param(req.Context(), ":splat")
+		// an existing artifact isn't created again so its metadata is never read, and if it's
+		// deleted in the meantime the metadata is read in the transaction as before
+		if _, err := artifact.Ctl.GetByReference(req.Context(), repo, dgt, nil); err == nil {
+			next.ServeHTTP(w, req)
+			return
+		}
+		ctx, err := artifact.PrepareMetadata(req.Context(), repo, dgt)
 		if err != nil {
 			lib_http.SendError(w, err)
 			return

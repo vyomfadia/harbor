@@ -207,8 +207,9 @@ func TestPushTransactionIntegrity(t *testing.T) {
 				}
 				require.EqualValues(t, networkCalls, puts.Load())
 				if outcome != "registry-error" {
-					require.EqualValues(t, networkCalls, backend.manifestReads.Load())
-					require.EqualValues(t, networkCalls, backend.blobReads.Load())
+					// the replay finds the artifact, so its metadata isn't read again
+					require.EqualValues(t, 1, backend.manifestReads.Load())
+					require.EqualValues(t, 1, backend.blobReads.Load())
 				}
 				if outcome == "retry" {
 					require.Equal(t, 2, attempts)
